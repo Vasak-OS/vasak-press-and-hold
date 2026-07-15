@@ -22,6 +22,7 @@ gtk = "0.18"
 gtk-layer-shell = "0.8"
 evdev = "0.12"
 xkbcommon = "0.7"
+libc = "0.2"
 base64 = "0.22"
 
 [profile.dev]
