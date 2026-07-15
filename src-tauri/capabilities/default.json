@@ -1,19 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the accent overlay",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
-    "shell:allow-open",
     "core:window:default",
-    "core:window:allow-start-dragging",
-    "core:window:allow-toggle-maximize",
-    "core:window:allow-minimize",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
     "core:window:allow-close",
-    "vicons:default",
     "config-manager:default"
   ]
 }

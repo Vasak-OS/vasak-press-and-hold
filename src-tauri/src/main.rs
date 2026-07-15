@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    vapp_lib::run()
+    vasak_press_and_hold_lib::run()
 }
