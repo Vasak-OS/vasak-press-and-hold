@@ -70,6 +70,13 @@ pub fn run_input_loop(app_handle: AppHandle, inject_rx: mpsc::Receiver<InjectCom
         return;
     }
 
+    // Grab devices for exclusive access (prevents duplicate events)
+    for device in &mut devices {
+        if let Err(e) = device.grab() {
+            eprintln!("Failed to grab device: {}. It may be in use by another program.", e);
+        }
+    }
+
     // Set devices to non-blocking mode
     for device in &mut devices {
         unsafe {
@@ -115,6 +122,9 @@ pub fn run_input_loop(app_handle: AppHandle, inject_rx: mpsc::Receiver<InjectCom
                             } else {
                                 forward_key_event(&vk, code, event.value());
                             }
+                        }
+                        InputEventKind::Synchronization(_) => {
+                            let _ = vk.send_event(0x00, 0, 0);
                         }
                         InputEventKind::RelAxis(axis) => {
                             let _ = vk.send_event(0x02, axis.0, event.value());
