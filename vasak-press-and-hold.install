@@ -1,0 +1,16 @@
+post_install() {
+    echo ""
+    echo "==> vasak-press-and-hold installed."
+    echo ""
+    echo "  udev rules with uaccess have been installed."
+    echo "  The active session will have access to input devices automatically."
+    echo ""
+    echo "  If devices are not accessible, reload udev rules:"
+    echo ""
+    echo "    sudo udevadm control --reload-rules && sudo udevadm trigger"
+    echo ""
+}
+
+post_upgrade() {
+    post_install
+}

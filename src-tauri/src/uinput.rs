@@ -46,8 +46,8 @@ impl VirtualKeyboard {
                 let err = std::io::Error::last_os_error();
                 return Err(format!(
                     "Cannot open /dev/uinput: {}. \
-                     Ensure your user is in the 'input' group: \
-                     sudo usermod -aG input $USER",
+                     Ensure udev rules are installed: \
+                     sudo udevadm control --reload-rules && sudo udevadm trigger",
                     err
                 ));
             }

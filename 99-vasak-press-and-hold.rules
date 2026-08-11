@@ -1,0 +1,6 @@
+# udev rules for vasak-press-and-hold
+# Grants active session access to input devices via uaccess
+# Installed by the package to /usr/lib/udev/rules.d/
+
+KERNEL=="uinput", MODE="0660", TAG+="uaccess"
+KERNEL=="event*", MODE="0660", TAG+="uaccess"
