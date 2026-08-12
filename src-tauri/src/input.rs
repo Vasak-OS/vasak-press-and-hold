@@ -70,11 +70,32 @@ pub fn run_input_loop(app_handle: AppHandle, inject_rx: mpsc::Receiver<InjectCom
         return;
     }
 
-    // Grab devices for exclusive access (prevents duplicate events)
-    for device in &mut devices {
-        if let Err(e) = device.grab() {
-            eprintln!("Failed to grab device: {}. It may be in use by another program.", e);
+    // Exclusive access, and the feature cannot work without it.
+    //
+    // Everything typed is replayed through the virtual keyboard, so a device we
+    // failed to grab keeps delivering to the compositor as well — every
+    // keystroke arrives twice. A device that cannot be grabbed is therefore
+    // dropped rather than used: no accents on that keyboard is a far better
+    // outcome than doubled letters on it.
+    devices.retain_mut(|device| match device.grab() {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "No se pudo tomar el control exclusivo de {}: {error}. \
+                 Se ignora ese teclado para no duplicar lo que escribas. \
+                 Suele ser permisos: revisá /dev/input/event* y las reglas de udev.",
+                device.name().unwrap_or("teclado desconocido")
+            );
+            false
         }
+    });
+
+    if devices.is_empty() {
+        eprintln!(
+            "Ningún teclado pudo tomarse en exclusiva; el selector de acentos queda \
+             desactivado. El teclado sigue funcionando normalmente."
+        );
+        return;
     }
 
     // Set devices to non-blocking mode

@@ -4,15 +4,18 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="Press & Hold Accents daemon - hold a key to get accented character variants on Wayland"
 arch=('x86_64' 'aarch64')
-url="https://github.com/VasakOS/vasak-press-and-hold"
+url="https://github.com/Vasak-OS/$pkgname"
 license=('MIT')
 depends=(
   'gtk3'
   'webkit2gtk-4.1'
   'libxkbcommon'
   'libappindicator-gtk3'
+  # The picker is drawn as a layer-shell surface so it can place itself.
+  'gtk-layer-shell'
 )
 makedepends=(
+  'git'
   'cargo'
   'bun'
   'webkit2gtk-4.1'
@@ -21,18 +24,13 @@ makedepends=(
   'gtk3'
 )
 install=vasak-press-and-hold.install
-source=("$pkgname-$pkgver.tar.gz::https://github.com/VasakOS/$pkgname/archive/refs/tags/v$pkgver.tar.gz"
-        "99-vasak-press-and-hold.rules")
-sha256sums=('SKIP' 'SKIP')
-
-prepare() {
-  cd "$pkgname-$pkgver"
-  export RUSTUP_TOOLCHAIN=stable
-  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
-}
+# git+ like every other VasakOS package: the tarball form needed a release tag
+# that was never cut, so the package could not be built at all.
+source=("git+${url}.git")
+sha256sums=('SKIP')
 
 build() {
-  cd "$pkgname-$pkgver"
+  cd "$srcdir/$pkgname"
   export RUSTUP_TOOLCHAIN=stable
   export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
   bun install --frozen-lockfile
@@ -40,15 +38,21 @@ build() {
 }
 
 package() {
-  cd "$pkgname-$pkgver"
+  cd "$srcdir/$pkgname"
 
   # Install binary
   install -Dm755 "src-tauri/target/release/vasak-press-and-hold" \
     "$pkgdir/usr/bin/vasak-press-and-hold"
 
   # Install udev rules for input device access
-  install -Dm644 "$srcdir/99-vasak-press-and-hold.rules" \
+  install -Dm644 "99-vasak-press-and-hold.rules" \
     "$pkgdir/usr/lib/udev/rules.d/99-vasak-press-and-hold.rules"
+
+  # Nothing started the daemon before this: no unit, no autostart entry. The
+  # feature was installed and simply never ran, which looks exactly like it not
+  # working.
+  install -Dm644 "packaging/$pkgname.service" \
+    "$pkgdir/usr/lib/systemd/user/$pkgname.service"
 
   # Install icons if present
   if [ -d src-tauri/icons ]; then

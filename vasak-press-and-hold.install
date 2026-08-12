@@ -1,16 +1,24 @@
 post_install() {
-    echo ""
-    echo "==> vasak-press-and-hold installed."
-    echo ""
-    echo "  udev rules with uaccess have been installed."
-    echo "  The active session will have access to input devices automatically."
-    echo ""
-    echo "  If devices are not accessible, reload udev rules:"
-    echo ""
-    echo "    sudo udevadm control --reload-rules && sudo udevadm trigger"
-    echo ""
+    # The daemon belongs to the graphical session. Nothing enabled it before,
+    # so the feature was installed and never ran.
+    mkdir -p /etc/systemd/user/graphical-session.target.wants
+    ln -sf /usr/lib/systemd/user/vasak-press-and-hold.service \
+        /etc/systemd/user/graphical-session.target.wants/vasak-press-and-hold.service
+
+    # The rules grant the session access to the input devices; without a reload
+    # they only take effect after the next boot.
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger --subsystem-match=input 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+
+    echo ":: El selector de acentos arranca con la próxima sesión gráfica."
 }
 
 post_upgrade() {
     post_install
+}
+
+post_remove() {
+    rm -f /etc/systemd/user/graphical-session.target.wants/vasak-press-and-hold.service
+    systemctl daemon-reload 2>/dev/null || true
 }
