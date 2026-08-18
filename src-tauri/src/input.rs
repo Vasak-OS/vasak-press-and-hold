@@ -55,19 +55,49 @@ pub fn find_keyboard_devices() -> Vec<Device> {
     devices
 }
 
+/// How long to keep trying to open /dev/uinput before giving up.
+///
+/// At login the daemon can easily win the race against udev and logind, which
+/// are what put the session's ACL on the device. Retrying costs nothing and
+/// turns a permanent failure into a slightly slower start.
+const UINPUT_ATTEMPTS: u32 = 10;
+const UINPUT_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub fn run_input_loop(app_handle: AppHandle, inject_rx: mpsc::Receiver<InjectCommand>) {
-    let vk = match VirtualKeyboard::new() {
-        Ok(vk) => vk,
-        Err(e) => {
-            eprintln!("Failed to create virtual keyboard: {}", e);
-            return;
+    let mut last_error = String::new();
+    let mut keyboard = None;
+
+    for attempt in 0..UINPUT_ATTEMPTS {
+        match VirtualKeyboard::new() {
+            Ok(vk) => {
+                keyboard = Some(vk);
+                break;
+            }
+            Err(e) => {
+                last_error = e;
+                if attempt + 1 < UINPUT_ATTEMPTS {
+                    std::thread::sleep(UINPUT_RETRY);
+                }
+            }
         }
+    }
+
+    // Without the virtual keyboard there is no feature: every key it grabs has
+    // to be replayed through it. Returning quietly left the process running and
+    // systemd reporting the unit as healthy, which is how this went unnoticed —
+    // `systemctl --user status` said "active (running)" while pressing and
+    // holding did nothing at all. Exiting is what makes the failure visible.
+    let Some(vk) = keyboard else {
+        eprintln!("Failed to create virtual keyboard: {}", last_error);
+        std::process::exit(1);
     };
 
     let mut devices = find_keyboard_devices();
     if devices.is_empty() {
-        eprintln!("No keyboard devices found. Exiting input loop.");
-        return;
+        // Same reasoning as above: no keyboard to watch means the feature does
+        // not exist, and a process that stays up hides that.
+        eprintln!("No keyboard devices found. Exiting.");
+        std::process::exit(1);
     }
 
     // Exclusive access, and the feature cannot work without it.

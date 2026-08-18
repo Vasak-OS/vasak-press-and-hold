@@ -1,6 +1,6 @@
 # Maintainer: Vasak Group
 pkgname=vasak-press-and-hold
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Press & Hold Accents daemon - hold a key to get accented character variants on Wayland"
 arch=('x86_64' 'aarch64')
@@ -47,6 +47,11 @@ package() {
   # Install udev rules for input device access
   install -Dm644 "99-vasak-press-and-hold.rules" \
     "$pkgdir/usr/lib/udev/rules.d/99-vasak-press-and-hold.rules"
+
+  # Loading uinput is what turns /dev/uinput into a real device; until then it
+  # is a static node the rules above cannot reach.
+  install -Dm644 "packaging/$pkgname.modules-load.conf" \
+    "$pkgdir/usr/lib/modules-load.d/$pkgname.conf"
 
   # Nothing started the daemon before this: no unit, no autostart entry. The
   # feature was installed and simply never ran, which looks exactly like it not

@@ -2,5 +2,19 @@
 # Grants active session access to input devices via uaccess
 # Installed by the package to /usr/lib/udev/rules.d/
 
-KERNEL=="uinput", MODE="0660", TAG+="uaccess"
+# `static_node` is what makes this rule reach /dev/uinput at all.
+#
+# uinput is listed in the kernel's modules.devname, so systemd creates the node
+# at boot — root:root 0600 — before the module is loaded. Until something opens
+# it there is no device and therefore no uevent, so a plain `KERNEL=="uinput"`
+# rule never runs and the permissions stay as they were. `uaccess` cannot help
+# either: an ACL needs a device to attach to, and a static node has none. That
+# is why the daemon kept reporting "Cannot open /dev/uinput: permission denied"
+# on a system where these rules were installed correctly.
+#
+# The group is what the static node is left with; once the module is loaded (see
+# the modules-load.d file this package ships) a real device shows up and the tag
+# below hands the active session an ACL, without anybody having to be added to
+# a group.
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput", TAG+="uaccess"
 KERNEL=="event*", MODE="0660", TAG+="uaccess"

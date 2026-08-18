@@ -5,10 +5,16 @@ post_install() {
     ln -sf /usr/lib/systemd/user/vasak-press-and-hold.service \
         /etc/systemd/user/graphical-session.target.wants/vasak-press-and-hold.service
 
+    # Loading uinput now rather than at the next boot: the rules can only grant
+    # access to a device that exists, and until the module is loaded /dev/uinput
+    # is a static node with nothing behind it.
+    modprobe uinput 2>/dev/null || true
+
     # The rules grant the session access to the input devices; without a reload
     # they only take effect after the next boot.
     udevadm control --reload-rules 2>/dev/null || true
     udevadm trigger --subsystem-match=input 2>/dev/null || true
+    udevadm trigger --name-match=uinput 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
 
     echo ":: El selector de acentos arranca con la próxima sesión gráfica."
