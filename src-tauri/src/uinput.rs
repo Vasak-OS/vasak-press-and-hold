@@ -55,6 +55,13 @@ const EV_KEY: u16 = 0x01;
 const EV_SYN: u16 = 0x00;
 const SYN_REPORT: u16 = 0x00;
 
+/// The name the virtual keyboard reports to the kernel.
+///
+/// Public because `input.rs` has to recognise it: the device this creates
+/// declares every keycode, so it looks exactly like a real keyboard to anything
+/// scanning /dev/input — including us.
+pub const DEVICE_NAME: &str = "vasak-press-and-hold";
+
 pub struct VirtualKeyboard {
     fd: RawFd,
 }
@@ -92,7 +99,10 @@ impl VirtualKeyboard {
 
             // Create device
             let mut dev: UinputUserDev = std::mem::zeroed();
-            let name = b"vasak-press-and-hold\0";
+            // The struct is zeroed, so the NUL terminator is already there as
+            // long as the name is shorter than the field.
+            let name = DEVICE_NAME.as_bytes();
+            debug_assert!(name.len() < UINPUT_MAX_NAME_SIZE);
             dev.name[..name.len()].copy_from_slice(name);
             dev.id.bustype = 0x03; // BUS_USB
             dev.id.vendor = 0x1234;

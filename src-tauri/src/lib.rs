@@ -95,9 +95,16 @@ pub fn run() {
 
             let (inject_tx, inject_rx) = mpsc::channel();
 
+            // One list, shared: the input loop fills it when the picker opens and
+            // `select_accent` reads it to know what the chosen index means. They
+            // used to be two separate Arcs, so the one the command read was never
+            // written to — every selection failed with «Invalid index» and the
+            // accent could not be typed at all.
+            let current_variants: Arc<Mutex<Vec<char>>> = Arc::new(Mutex::new(Vec::new()));
+
             app.manage(AppState {
                 gtk_tx,
-                current_variants: Arc::new(Mutex::new(Vec::new())),
+                current_variants: current_variants.clone(),
                 inject_tx,
             });
 
@@ -106,7 +113,9 @@ pub fn run() {
             }
 
             let handle = app.handle().clone();
-            std::thread::spawn(move || input::run_input_loop(handle, inject_rx));
+            std::thread::spawn(move || {
+                input::run_input_loop(handle, inject_rx, current_variants)
+            });
 
             Ok(())
         })

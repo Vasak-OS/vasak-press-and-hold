@@ -37,6 +37,20 @@ pub fn find_keyboard_devices() -> Vec<Device> {
                 .map_or(false, |n| n.starts_with("event"))
             {
                 if let Ok(device) = Device::open(&path) {
+                    // Never our own virtual keyboard.
+                    //
+                    // It declares every keycode, so it satisfies the KEY_A test
+                    // like any real keyboard. Grabbing it takes every key we
+                    // replay through it away from the compositor and feeds it
+                    // straight back into this loop: the keyboard goes dead and
+                    // the process spins. This is normally impossible because the
+                    // enumeration below runs before the device is created, but a
+                    // second instance — or one left over from a crash — would
+                    // put it there, and the cost of being wrong is a machine
+                    // nobody can type on.
+                    if device.name() == Some(crate::uinput::DEVICE_NAME) {
+                        continue;
+                    }
                     if let Some(keys) = device.supported_keys() {
                         if keys.contains(Key::KEY_A) {
                             devices.push(device);
@@ -63,7 +77,25 @@ pub fn find_keyboard_devices() -> Vec<Device> {
 const UINPUT_ATTEMPTS: u32 = 10;
 const UINPUT_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
 
-pub fn run_input_loop(app_handle: AppHandle, inject_rx: mpsc::Receiver<InjectCommand>) {
+pub fn run_input_loop(
+    app_handle: AppHandle,
+    inject_rx: mpsc::Receiver<InjectCommand>,
+    current_variants: Arc<Mutex<Vec<char>>>,
+) {
+    // The real keyboards are enumerated first, while the virtual one does not
+    // exist yet, so it cannot end up in this list. The order used to be the
+    // other way round and that was enough to lock the machine: the virtual
+    // keyboard declares every keycode, so it matched the search, got grabbed
+    // along with the rest, and every key replayed through it was captured by
+    // this process instead of reaching the compositor.
+    let mut devices = find_keyboard_devices();
+    if devices.is_empty() {
+        // No keyboard to watch means the feature does not exist, and a process
+        // that stays up hides that from `systemctl --user status`.
+        eprintln!("No keyboard devices found. Exiting.");
+        std::process::exit(1);
+    }
+
     let mut last_error = String::new();
     let mut keyboard = None;
 
@@ -87,18 +119,13 @@ pub fn run_input_loop(app_handle: AppHandle, inject_rx: mpsc::Receiver<InjectCom
     // systemd reporting the unit as healthy, which is how this went unnoticed —
     // `systemctl --user status` said "active (running)" while pressing and
     // holding did nothing at all. Exiting is what makes the failure visible.
+    // Nothing is grabbed yet at this point, on purpose: the retry loop above can
+    // take five seconds, and holding an exclusive grab while waiting for
+    // /dev/uinput would leave the keyboard dead for exactly as long.
     let Some(vk) = keyboard else {
         eprintln!("Failed to create virtual keyboard: {}", last_error);
         std::process::exit(1);
     };
-
-    let mut devices = find_keyboard_devices();
-    if devices.is_empty() {
-        // Same reasoning as above: no keyboard to watch means the feature does
-        // not exist, and a process that stays up hides that.
-        eprintln!("No keyboard devices found. Exiting.");
-        std::process::exit(1);
-    }
 
     // Exclusive access, and the feature cannot work without it.
     //
@@ -139,7 +166,6 @@ pub fn run_input_loop(app_handle: AppHandle, inject_rx: mpsc::Receiver<InjectCom
 
     let variants_map = get_variants();
     let mut states: HashMap<u16, KeyState> = HashMap::new();
-    let current_variants: Arc<Mutex<Vec<char>>> = Arc::new(Mutex::new(Vec::new()));
 
     loop {
         // 1. Check inject channel
@@ -190,6 +216,44 @@ pub fn run_input_loop(app_handle: AppHandle, inject_rx: mpsc::Receiver<InjectCom
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug that locked the machine: the virtual keyboard declares every
+    /// keycode, so it matches the same search that looks for real keyboards. When
+    /// it ended up in that list it got grabbed too, and every key replayed
+    /// through it was captured by this process instead of reaching the
+    /// compositor — the keyboard went dead and only killing the daemon from
+    /// another machine or a TTY brought it back.
+    ///
+    /// Ignored by default because it needs /dev/uinput and read access to
+    /// /dev/input/event*, which is what the shipped udev rule grants:
+    /// `cargo test -- --ignored --nocapture`. It never grabs anything, so it
+    /// cannot lock the keyboard it runs on.
+    #[test]
+    #[ignore]
+    fn the_search_never_returns_our_own_virtual_keyboard() {
+        let _vk = crate::uinput::VirtualKeyboard::new().expect("no se pudo crear el teclado virtual");
+        // The device shows up asynchronously; the constructor already waits, but
+        // give udev room so a miss here means the filter worked, not that the
+        // device was not there yet.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let found = find_keyboard_devices();
+        let names: Vec<String> = found
+            .iter()
+            .map(|d| d.name().unwrap_or("(sin nombre)").to_string())
+            .collect();
+        println!("teclados encontrados: {names:?}");
+
+        assert!(
+            !names.iter().any(|n| n == crate::uinput::DEVICE_NAME),
+            "la búsqueda devolvió nuestro propio teclado virtual: {names:?}"
+        );
+    }
+}
+
 fn forward_key_event(vk: &VirtualKeyboard, code: u16, value: i32) {
     let _ = vk.send_event(0x01, code, value);
 }
@@ -217,8 +281,13 @@ fn handle_target_key(
         0 => {
             // Release
             if let Some(state) = states.remove(&code) {
-                if !state.held_emitted && state.pressed_at.elapsed() < HOLD_THRESHOLD {
-                    // Quick tap - forward as normal keystroke
+                // If the picker never opened, the key has to be typed — no matter
+                // how long it was held. The elapsed time used to be checked here
+                // too, so holding a key that has no accented variants for more
+                // than the threshold swallowed the letter: the press was never
+                // forwarded and the release decided it was too late to bother.
+                // Holding `s` and letting go typed nothing at all.
+                if !state.held_emitted {
                     let _ = vk.send_event(0x01, code, 1);
                     let _ = vk.send_event(0x01, code, 0);
                 }
