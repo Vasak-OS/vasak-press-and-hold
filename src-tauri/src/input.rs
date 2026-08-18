@@ -15,9 +15,105 @@ pub enum InjectCommand {
     Char(char),
 }
 
-struct KeyState {
+/// The key we are still deciding about: letter, or the start of a hold?
+///
+/// There is only ever one. Anything else that happens settles it first, and
+/// that is what keeps letters in the order they were typed.
+struct Pending {
+    code: u16,
     pressed_at: Instant,
-    held_emitted: bool,
+    /// The picker is open for this key, so releasing it types nothing: the
+    /// character is going to come from whichever variant gets chosen.
+    picker_open: bool,
+}
+
+/// What one key event should produce.
+///
+/// Kept apart from the writing so the ordering — the thing this module gets
+/// wrong when it gets anything wrong — can be tested without a virtual
+/// keyboard and without a compositor.
+#[derive(Debug, PartialEq)]
+enum Action {
+    /// Type the key: press and release, in one go.
+    Tap(u16),
+    /// Pass the event through untouched.
+    Forward(u16, i32),
+    /// Show the accent picker for this key.
+    OpenPicker(u16),
+}
+
+/// Decides what to do with one key event.
+///
+/// A key that has accented variants cannot be typed the moment it goes down:
+/// we do not know yet whether it is a letter or the beginning of a hold. It
+/// used to be typed on release, and that is what scrambled fast typing —
+/// "as" comes out as "sa" the moment you press the second key before letting
+/// go of the first, which is how anybody types above a certain speed. It was
+/// invisible in a text editor, where you notice and fix it, and brutal in a
+/// password field, where you cannot see what you typed: the lock screen kept
+/// rejecting the right password.
+///
+/// So the wait ends at the *next* key event rather than at the release.
+/// Whatever happens next settles the pending key first, in the order it was
+/// pressed. A hold is by definition a key with nothing happening after it, so
+/// the picker still works exactly as before.
+fn decide(
+    pending: &mut Option<Pending>,
+    code: u16,
+    value: i32,
+    now: Instant,
+    is_target: bool,
+) -> Vec<Action> {
+    let mut actions = Vec::new();
+
+    // Any event about a different key settles what was pending — a release
+    // included: flushing a letter after Shift went back up would turn the
+    // capital into a lowercase one.
+    if pending.as_ref().is_some_and(|p| p.code != code) {
+        if let Some(p) = pending.take() {
+            if !p.picker_open {
+                actions.push(Action::Tap(p.code));
+            }
+        }
+    }
+
+    if !is_target {
+        actions.push(Action::Forward(code, value));
+        return actions;
+    }
+
+    match value {
+        // Press: nothing to type yet.
+        1 => {
+            *pending = Some(Pending {
+                code,
+                pressed_at: now,
+                picker_open: false,
+            });
+        }
+        // Repeat: the key is being held and nothing else has happened.
+        2 => {
+            if let Some(p) = pending.as_mut() {
+                if !p.picker_open && now.duration_since(p.pressed_at) >= HOLD_THRESHOLD {
+                    p.picker_open = true;
+                    actions.push(Action::OpenPicker(code));
+                }
+            }
+        }
+        // Release: if the picker never opened this was a letter, however long
+        // it was held. Checking the elapsed time here as well used to swallow
+        // letters that have no accented variants.
+        0 => {
+            if let Some(p) = pending.take() {
+                if !p.picker_open {
+                    actions.push(Action::Tap(p.code));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    actions
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -165,7 +261,7 @@ pub fn run_input_loop(
     }
 
     let variants_map = get_variants();
-    let mut states: HashMap<u16, KeyState> = HashMap::new();
+    let mut pending: Option<Pending> = None;
 
     loop {
         // 1. Check inject channel
@@ -186,18 +282,21 @@ pub fn run_input_loop(
                     match event.kind() {
                         InputEventKind::Key(key) => {
                             let code = key.code();
-                            if key_to_base_char(code).is_some() {
-                                handle_target_key(
-                                    code,
-                                    event.value(),
-                                    &mut states,
+                            let is_target = key_to_base_char(code).is_some();
+                            for action in decide(
+                                &mut pending,
+                                code,
+                                event.value(),
+                                Instant::now(),
+                                is_target,
+                            ) {
+                                run_action(
+                                    action,
                                     &vk,
                                     &app_handle,
                                     &variants_map,
                                     &current_variants,
                                 );
-                            } else {
-                                forward_key_event(&vk, code, event.value());
                             }
                         }
                         InputEventKind::Synchronization(_) => {
@@ -219,6 +318,69 @@ pub fn run_input_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Códigos evdev de teclas con variantes acentuadas. Son opacos a propósito:
+    // lo que se prueba es el orden, no el mapa de teclado.
+    const A: u16 = 30;
+    const S: u16 = 31;
+    const SHIFT: u16 = 42;
+
+    /// El bug que hacía que la pantalla de bloqueo rechazara la contraseña
+    /// correcta: escribiendo rápido se aprieta la segunda tecla antes de soltar
+    /// la primera, y como la letra se escribía al soltar, "as" salía "sa".
+    #[test]
+    fn escribir_rapido_respeta_el_orden_en_que_se_tecleo() {
+        let ahora = Instant::now();
+        let mut pending = None;
+        let mut hechas = Vec::new();
+
+        hechas.extend(decide(&mut pending, A, 1, ahora, true));
+        hechas.extend(decide(&mut pending, S, 1, ahora, true));
+        hechas.extend(decide(&mut pending, A, 0, ahora, true)); // se suelta después
+        hechas.extend(decide(&mut pending, S, 0, ahora, true));
+
+        assert_eq!(hechas, vec![Action::Tap(A), Action::Tap(S)]);
+    }
+
+    /// Una letra sola sigue escribiéndose una única vez.
+    #[test]
+    fn una_tecla_suelta_escribe_una_letra() {
+        let ahora = Instant::now();
+        let mut pending = None;
+        assert!(decide(&mut pending, A, 1, ahora, true).is_empty());
+        assert_eq!(decide(&mut pending, A, 0, ahora, true), vec![Action::Tap(A)]);
+    }
+
+    /// Mantener apretado abre el selector y no escribe la letra base: eso lo
+    /// hace después la variante elegida.
+    #[test]
+    fn mantener_apretado_abre_el_selector_y_no_escribe_la_letra() {
+        let ahora = Instant::now();
+        let mut pending = None;
+        decide(&mut pending, A, 1, ahora, true);
+
+        let tarde = ahora + HOLD_THRESHOLD;
+        assert_eq!(decide(&mut pending, A, 2, tarde, true), vec![Action::OpenPicker(A)]);
+        assert!(decide(&mut pending, A, 2, tarde, true).is_empty(), "el selector se abre una sola vez");
+        assert!(decide(&mut pending, A, 0, tarde, true).is_empty());
+    }
+
+    /// Una tecla sin variantes —o un modificador— también ordena lo pendiente.
+    /// Soltar Shift antes de escribir la letra pendiente la habría convertido en
+    /// minúscula.
+    #[test]
+    fn una_tecla_ajena_ordena_lo_pendiente_antes_de_pasar() {
+        let ahora = Instant::now();
+        let mut pending = None;
+        decide(&mut pending, A, 1, ahora, true);
+
+        assert_eq!(
+            decide(&mut pending, SHIFT, 0, ahora, false),
+            vec![Action::Tap(A), Action::Forward(SHIFT, 0)]
+        );
+        // Al soltarla más tarde ya no escribe nada: la letra ya salió.
+        assert!(decide(&mut pending, A, 0, ahora, true).is_empty());
+    }
 
     /// The bug that locked the machine: the virtual keyboard declares every
     /// keycode, so it matches the same search that looks for real keyboards. When
@@ -254,66 +416,36 @@ mod tests {
     }
 }
 
-fn forward_key_event(vk: &VirtualKeyboard, code: u16, value: i32) {
-    let _ = vk.send_event(0x01, code, value);
-}
-
-fn handle_target_key(
-    code: u16,
-    value: i32,
-    states: &mut HashMap<u16, KeyState>,
+/// Carries out one decision.
+fn run_action(
+    action: Action,
     vk: &VirtualKeyboard,
     app: &AppHandle,
-    variants_map: &std::collections::HashMap<char, Vec<char>>,
+    variants_map: &HashMap<char, Vec<char>>,
     current_variants: &Arc<Mutex<Vec<char>>>,
 ) {
-    match value {
-        1 => {
-            // Press
-            states.insert(
-                code,
-                KeyState {
-                    pressed_at: Instant::now(),
-                    held_emitted: false,
-                },
-            );
+    match action {
+        Action::Tap(code) => {
+            let _ = vk.send_event(0x01, code, 1);
+            let _ = vk.send_event(0x01, code, 0);
         }
-        0 => {
-            // Release
-            if let Some(state) = states.remove(&code) {
-                // If the picker never opened, the key has to be typed — no matter
-                // how long it was held. The elapsed time used to be checked here
-                // too, so holding a key that has no accented variants for more
-                // than the threshold swallowed the letter: the press was never
-                // forwarded and the release decided it was too late to bother.
-                // Holding `s` and letting go typed nothing at all.
-                if !state.held_emitted {
-                    let _ = vk.send_event(0x01, code, 1);
-                    let _ = vk.send_event(0x01, code, 0);
-                }
-            }
+        Action::Forward(code, value) => {
+            let _ = vk.send_event(0x01, code, value);
         }
-        2 => {
-            // Repeat
-            if let Some(state) = states.get_mut(&code) {
-                if !state.held_emitted && state.pressed_at.elapsed() >= HOLD_THRESHOLD {
-                    state.held_emitted = true;
-                    if let Some(base) = key_to_base_char(code) {
-                        if let Some(vars) = variants_map.get(&base) {
-                            let payload = AccentPayload {
-                                base_char: base.to_string(),
-                                variants: vars.iter().map(|c| c.to_string()).collect(),
-                            };
-                            {
-                                let mut cv = current_variants.lock().unwrap();
-                                *cv = vars.clone();
-                            }
-                            let _ = app.emit("show-accent-menu", payload);
-                        }
+        Action::OpenPicker(code) => {
+            if let Some(base) = key_to_base_char(code) {
+                if let Some(vars) = variants_map.get(&base) {
+                    let payload = AccentPayload {
+                        base_char: base.to_string(),
+                        variants: vars.iter().map(|c| c.to_string()).collect(),
+                    };
+                    {
+                        let mut cv = current_variants.lock().unwrap();
+                        *cv = vars.clone();
                     }
+                    let _ = app.emit("show-accent-menu", payload);
                 }
             }
         }
-        _ => {}
     }
 }
