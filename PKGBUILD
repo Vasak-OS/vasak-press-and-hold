@@ -1,7 +1,7 @@
 # Maintainer: Vasak Group
 pkgname=vasak-press-and-hold
 pkgver=0.1.1
-pkgrel=2
+pkgrel=3
 pkgdesc="Press & Hold Accents daemon - hold a key to get accented character variants on Wayland"
 arch=('x86_64' 'aarch64')
 url="https://github.com/Vasak-OS/$pkgname"

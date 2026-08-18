@@ -10,14 +10,38 @@ struct InputEvent {
     value: i32,
 }
 
+const UINPUT_MAX_NAME_SIZE: usize = 80;
+/// ABS_CNT from the kernel's input-event-codes.h. The arrays below are part of
+/// the struct even for a device with no absolute axes.
+const ABS_CNT: usize = 64;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct InputId {
+    bustype: u16,
+    vendor: u16,
+    product: u16,
+    version: u16,
+}
+
+/// `struct uinput_user_dev`, byte for byte as the kernel declares it.
+///
+/// This has to match exactly: the legacy setup path is a `write()` and
+/// `uinput_setup_device` rejects anything whose length is not
+/// `sizeof(struct uinput_user_dev)`. The previous definition declared the bus
+/// type as 32 bits — it is 16 — and left out the four absolute-axis arrays
+/// entirely, which made it 96 bytes against the 1116 the kernel expects. Every
+/// write returned EINVAL, so the virtual keyboard was never created and the
+/// accent picker could not type anything, on any machine.
 #[repr(C)]
 struct UinputUserDev {
-    name: [u8; 80],
-    id_bustype: u32,
-    id_vendor: u16,
-    id_product: u16,
-    id_version: u16,
+    name: [u8; UINPUT_MAX_NAME_SIZE],
+    id: InputId,
     ff_effects_max: u32,
+    absmax: [i32; ABS_CNT],
+    absmin: [i32; ABS_CNT],
+    absfuzz: [i32; ABS_CNT],
+    absflat: [i32; ABS_CNT],
 }
 
 mod ioctl_defs {
@@ -70,17 +94,22 @@ impl VirtualKeyboard {
             let mut dev: UinputUserDev = std::mem::zeroed();
             let name = b"vasak-press-and-hold\0";
             dev.name[..name.len()].copy_from_slice(name);
-            dev.id_bustype = 0x03; // BUS_USB
-            dev.id_vendor = 0x1234;
-            dev.id_product = 0x5678;
-            dev.id_version = 1;
+            dev.id.bustype = 0x03; // BUS_USB
+            dev.id.vendor = 0x1234;
+            dev.id.product = 0x5678;
+            dev.id.version = 1;
 
             let ptr = &dev as *const UinputUserDev as *const libc::c_void;
             if libc::write(fd, ptr, std::mem::size_of::<UinputUserDev>())
                 != std::mem::size_of::<UinputUserDev>() as isize
             {
+                let err = std::io::Error::last_os_error();
                 libc::close(fd);
-                return Err("Failed to write device info".into());
+                return Err(format!(
+                    "Failed to write device info ({} bytes): {}",
+                    std::mem::size_of::<UinputUserDev>(),
+                    err
+                ));
             }
 
             if libc::ioctl(fd, ioctl_defs::UI_DEV_CREATE) < 0 {
@@ -172,4 +201,35 @@ fn find_keycode_for_keysym(keysym: u32) -> Result<u16, String> {
     }
 
     Err(format!("No keycode found for keysym 0x{:x}", keysym))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kernel rejects the setup write unless its length is exactly
+    /// `sizeof(struct uinput_user_dev)`, so this number is not a detail: at 96
+    /// bytes — what the struct used to be — every write returned EINVAL and the
+    /// virtual keyboard was never created.
+    #[test]
+    fn the_device_struct_is_the_size_the_kernel_expects() {
+        assert_eq!(std::mem::size_of::<InputId>(), 8);
+        assert_eq!(std::mem::size_of::<UinputUserDev>(), 1116);
+        // name, then the id right after it, then ff_effects_max at 88.
+        assert_eq!(std::mem::offset_of!(UinputUserDev, id), 80);
+        assert_eq!(std::mem::offset_of!(UinputUserDev, ff_effects_max), 88);
+    }
+
+    /// The real thing, against the real kernel. Ignored by default because it
+    /// needs access to /dev/uinput, which is exactly what it is checking:
+    /// `cargo test -- --ignored --nocapture` on a machine where the udev rule
+    /// this package ships is installed.
+    #[test]
+    #[ignore]
+    fn the_kernel_accepts_the_device() {
+        match VirtualKeyboard::new() {
+            Ok(_) => println!("teclado virtual creado y destruido"),
+            Err(e) => panic!("{e}"),
+        }
+    }
 }
