@@ -24,6 +24,8 @@ evdev = "0.12"
 xkbcommon = "0.7"
 libc = "0.2"
 base64 = "0.22"
+wayland-client = "0.31"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
 
 [profile.dev]
 incremental = true # Compile your binary in smaller steps.

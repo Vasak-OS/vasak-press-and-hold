@@ -1,4 +1,5 @@
 mod accent_map;
+mod char_input;
 mod input;
 mod uinput;
 
@@ -31,22 +32,6 @@ fn select_accent(app: AppHandle, index: usize) -> Result<(), String> {
         .inject_tx
         .send(input::InjectCommand::Char(ch))
         .map_err(|e| e.to_string())?;
-
-    if let Some(win) = app.get_webview_window("main") {
-        win.hide().map_err(|e| e.to_string())?;
-    }
-
-    state
-        .gtk_tx
-        .send(GtkCommand::SetKeyboardInteractivity(false))
-        .ok();
-
-    Ok(())
-}
-
-#[tauri::command]
-fn dismiss_accent(app: AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
 
     if let Some(win) = app.get_webview_window("main") {
         win.hide().map_err(|e| e.to_string())?;
@@ -119,7 +104,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![select_accent, dismiss_accent])
+        .invoke_handler(tauri::generate_handler![select_accent])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -17,6 +17,7 @@
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@vasakgroup/plugin-config-manager": "^2.2.6",
+    "pinia": "^4.0.3",
     "vue": "^3.5.41"
   },
   "devDependencies": {
