@@ -1,6 +1,14 @@
 # udev rules for vasak-press-and-hold
 # Grants active session access to input devices via uaccess
 # Installed by the package to /usr/lib/udev/rules.d/
+#
+# The number matters. systemd consumes the `uaccess` tag in
+# 73-seat-late.rules, and udev applies rule files in the lexical order of their
+# names: a rule numbered 99 adds the tag long after the builtin that reads it
+# has already run, so the tag is set and nothing ever looks at it. That is why
+# /dev/uinput came out root:input 0660 with no ACL for the person at the
+# keyboard — the group and mode below did apply, the tag did not. Everything
+# else on the system that uses uaccess is numbered below 73 for this reason.
 
 # `static_node` is what makes this rule reach /dev/uinput at all.
 #

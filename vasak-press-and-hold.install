@@ -10,6 +10,12 @@ post_install() {
     # is a static node with nothing behind it.
     modprobe uinput 2>/dev/null || true
 
+    # The rule used to be numbered 99, which is after the point where systemd
+    # reads the uaccess tag. Upgrades from those versions leave the old file
+    # behind only if it was edited; removing it here costs nothing and avoids
+    # two rules disagreeing about the same device.
+    rm -f /etc/udev/rules.d/99-vasak-press-and-hold.rules
+
     # The rules grant the session access to the input devices; without a reload
     # they only take effect after the next boot.
     udevadm control --reload-rules 2>/dev/null || true
