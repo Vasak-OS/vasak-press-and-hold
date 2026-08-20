@@ -76,8 +76,8 @@ impl CharKeyboard {
             .collect();
 
         let keymap = keymap_for(chars);
-        let file = memfd(&keymap)?;
-        keyboard.keymap(1 /* xkb_v1 */, file.as_fd(), keymap.len() as u32);
+        let (file, size) = memfd(&keymap)?;
+        keyboard.keymap(1 /* xkb_v1 */, file.as_fd(), size);
 
         // Sin esto, un Shift que quedó apretado en el teclado real se aplicaría
         // también a lo que escribimos acá.
@@ -136,8 +136,17 @@ fn keymap_for(chars: &[char]) -> String {
     )
 }
 
-/// The keymap travels to the compositor as a file descriptor.
-fn memfd(contents: &str) -> Result<OwnedFd, String> {
+/// The keymap travels to the compositor as a file descriptor, and the size
+/// that goes with it **includes the terminating NUL**.
+///
+/// Del otro lado el compositor hace mmap de exactamente esos bytes y se los
+/// pasa a `xkb_keymap_new_from_string`, que espera una cadena de C. Sin el cero
+/// final el mapa no compila, y entonces no pasa lo que uno esperaría —que no se
+/// escriba nada— sino algo peor: el teclado virtual se queda con la
+/// distribución de la sesión, así que las teclas que inventamos significan otra
+/// cosa. La ñ es la variante número 15, o sea el keycode 16, que en cualquier
+/// distribución es la Q: mantener la n y elegir la ñ escribía «q».
+fn memfd(contents: &str) -> Result<(OwnedFd, u32), String> {
     let fd = unsafe { libc::memfd_create(b"vasak-keymap\0".as_ptr() as *const _, 0) };
     if fd < 0 {
         return Err(format!(
@@ -149,10 +158,12 @@ fn memfd(contents: &str) -> Result<OwnedFd, String> {
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.write_all(contents.as_bytes())
         .map_err(|e| format!("no se pudo escribir el mapa: {e}"))?;
+    file.write_all(&[0])
+        .map_err(|e| format!("no se pudo cerrar el mapa: {e}"))?;
     file.rewind()
         .map_err(|e| format!("no se pudo rebobinar el mapa: {e}"))?;
 
-    Ok(OwnedFd::from(file))
+    Ok((OwnedFd::from(file), contents.len() as u32 + 1))
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Globals {
@@ -205,6 +216,53 @@ sin_eventos!(wl_seat::WlSeat, ZwpVirtualKeyboardManagerV1, ZwpVirtualKeyboardV1)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lo que ve el compositor: los bytes del descriptor, exactamente el tamaño
+    /// que le anunciamos, terminados en cero.
+    ///
+    /// Es el único lugar donde se notaba el error, y no se notaba como una
+    /// falla: sin el cero final el mapa no compila del otro lado, el teclado
+    /// virtual se queda con la distribución de la sesión, y elegir la ñ
+    /// —variante 15, keycode 16— escribía «q». El test de abajo pasaba igual,
+    /// porque en el mismo proceso el mapa es un &str de Rust y nunca cruza esa
+    /// frontera.
+    #[test]
+    fn el_mapa_llega_terminado_en_cero() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+
+        let chars = ['é', 'ñ'];
+        let texto = keymap_for(&chars);
+        let (fd, size) = memfd(&texto).expect("no se pudo crear el descriptor");
+
+        let mut bytes = vec![0u8; size as usize];
+        let leidos = unsafe {
+            libc::read(
+                fd.as_raw_fd(),
+                bytes.as_mut_ptr() as *mut libc::c_void,
+                bytes.len(),
+            )
+        };
+        assert_eq!(leidos, size as isize, "el descriptor no tiene los bytes anunciados");
+        assert_eq!(bytes[bytes.len() - 1], 0, "el mapa no termina en cero");
+
+        // Y compila leído así, que es como lo lee el compositor.
+        use xkbcommon::xkb;
+        let contexto = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let como_cadena = String::from_utf8(bytes[..bytes.len() - 1].to_vec()).unwrap();
+        assert!(
+            xkb::Keymap::new_from_string(
+                &contexto,
+                como_cadena,
+                xkb::KEYMAP_FORMAT_TEXT_V1,
+                xkb::KEYMAP_COMPILE_NO_FLAGS,
+            )
+            .is_some(),
+            "el mapa no compila tal como viaja"
+        );
+
+        let _ = fd;
+    }
 
     /// El mapa tiene que compilar y cada tecla tiene que dar exactamente el
     /// carácter que le pedimos. Se prueba con la misma biblioteca que usa el
