@@ -218,8 +218,13 @@ impl VirtualKeyboard {
 
             let leidos = leidos as usize;
             for trozo in buffer[..leidos].chunks_exact(tamano) {
-                // El buffer se llenó desde el kernel con esta misma estructura.
-                let evento: InputEvent = unsafe { std::ptr::read(trozo.as_ptr() as *const _) };
+                // El buffer se llenó desde el kernel con esta misma estructura,
+                // pero es un `Vec<u8>`: la única alineación garantizada es de un
+                // byte, y `InputEvent` empieza con dos enteros de ocho. Leerlo
+                // como si estuviera alineado es comportamiento indefinido, así
+                // que se lee sin suponer nada.
+                let evento: InputEvent =
+                    unsafe { std::ptr::read_unaligned(trozo.as_ptr() as *const _) };
                 if evento.type_ == EV_LED {
                     cambios.push((evento.code, evento.value != 0));
                 }
