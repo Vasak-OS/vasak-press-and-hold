@@ -372,6 +372,30 @@ pub fn run_input_loop(
             }
         }
 
+        // 1b. Las luces del teclado.
+        //
+        // Los teclados de verdad están tomados en exclusiva, así que el
+        // compositor no los ve: enciende y apaga las luces del teclado virtual,
+        // que es el único que conoce. Sin replicarlo, la luz de Bloq Mayús no se
+        // prende nunca —ni en el teclado ni para quien quiera leer ese estado—
+        // aunque las mayúsculas se escriban bien.
+        for (led, encendido) in vk.read_led_events() {
+            let evento = evdev::InputEvent::new(
+                evdev::EventType::LED,
+                led,
+                if encendido { 1 } else { 0 },
+            );
+
+            for device in &mut devices {
+                if let Err(error) = device.send_events(&[evento]) {
+                    eprintln!(
+                        "No se pudo copiar la luz {led} a {}: {error}",
+                        device.name().unwrap_or("teclado desconocido")
+                    );
+                }
+            }
+        }
+
         // 2. Read events from all devices
         for device in &mut devices {
             if let Ok(events) = device.fetch_events() {

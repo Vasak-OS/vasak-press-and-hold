@@ -47,13 +47,20 @@ struct UinputUserDev {
 mod ioctl_defs {
     pub const UI_SET_EVBIT: u64 = 0x40045564;
     pub const UI_SET_KEYBIT: u64 = 0x40045565;
+    pub const UI_SET_LEDBIT: u64 = 0x40045569;
     pub const UI_DEV_CREATE: u64 = 0x5501;
     pub const UI_DEV_DESTROY: u64 = 0x5502;
 }
 
 const EV_KEY: u16 = 0x01;
 const EV_SYN: u16 = 0x00;
+const EV_LED: u16 = 0x11;
 const SYN_REPORT: u16 = 0x00;
+
+/// Las luces que tiene un teclado: Bloq Num, Bloq Mayús, Bloq Despl, Componer y
+/// Kana. Se declaran todas y no sólo la de mayúsculas porque el compositor
+/// maneja el conjunto: un teclado que dice tener una sola es un teclado raro.
+const LEDS: [u16; 5] = [0, 1, 2, 3, 4];
 
 /// The name the virtual keyboard reports to the kernel.
 ///
@@ -87,6 +94,26 @@ impl VirtualKeyboard {
             if libc::ioctl(fd, ioctl_defs::UI_SET_EVBIT, EV_KEY as libc::c_uint) < 0 {
                 libc::close(fd);
                 return Err("Failed to set EV_KEY bit".into());
+            }
+
+            // Las luces.
+            //
+            // Sin esto el teclado virtual no tiene ninguna, y como el físico
+            // está tomado en exclusiva el compositor se queda sin dónde
+            // encender la de Bloq Mayús: la luz del teclado no se prendía nunca
+            // y el indicador del panel no tenía qué leer. El compositor escribe
+            // en este mismo descriptor cuando el estado cambia (ver
+            // `read_led_events`).
+            if libc::ioctl(fd, ioctl_defs::UI_SET_EVBIT, EV_LED as libc::c_uint) < 0 {
+                libc::close(fd);
+                return Err("Failed to set EV_LED bit".into());
+            }
+
+            for led in LEDS {
+                if libc::ioctl(fd, ioctl_defs::UI_SET_LEDBIT, led as libc::c_uint) < 0 {
+                    libc::close(fd);
+                    return Err(format!("Failed to set ledbit for {}", led));
+                }
             }
 
             // Enable all keycodes (0..256)
@@ -163,6 +190,52 @@ impl VirtualKeyboard {
             }
         }
         Ok(())
+    }
+
+    /// Las luces que el compositor quiere encender o apagar.
+    ///
+    /// Un dispositivo de uinput es de ida y vuelta: lo que el sistema decide
+    /// sobre sus LEDs vuelve por el mismo descriptor. Como el teclado de verdad
+    /// está tomado en exclusiva, este es el único lugar donde se puede saber que
+    /// Bloq Mayús cambió; quien llama replica cada cambio en los teclados
+    /// físicos para que la lucecita vuelva a funcionar.
+    ///
+    /// No bloquea: el descriptor es `O_NONBLOCK` y sin nada que leer devuelve
+    /// la lista vacía.
+    pub fn read_led_events(&self) -> Vec<(u16, bool)> {
+        let mut cambios = Vec::new();
+        let tamano = std::mem::size_of::<InputEvent>();
+        let mut buffer = vec![0u8; tamano * 16];
+
+        loop {
+            let leidos = unsafe {
+                libc::read(self.fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len())
+            };
+
+            if leidos <= 0 {
+                break;
+            }
+
+            let leidos = leidos as usize;
+            for trozo in buffer[..leidos].chunks_exact(tamano) {
+                // El buffer se llenó desde el kernel con esta misma estructura,
+                // pero es un `Vec<u8>`: la única alineación garantizada es de un
+                // byte, y `InputEvent` empieza con dos enteros de ocho. Leerlo
+                // como si estuviera alineado es comportamiento indefinido, así
+                // que se lee sin suponer nada.
+                let evento: InputEvent =
+                    unsafe { std::ptr::read_unaligned(trozo.as_ptr() as *const _) };
+                if evento.type_ == EV_LED {
+                    cambios.push((evento.code, evento.value != 0));
+                }
+            }
+
+            if leidos < buffer.len() {
+                break;
+            }
+        }
+
+        cambios
     }
 
     pub fn send_key(&self, code: u16, pressed: bool) -> Result<(), String> {
