@@ -23,11 +23,22 @@ struct AppState {
 /// es el mismo mecanismo que usa el resto del archivo, sin un canal ni un enum
 /// de comandos de un solo caso.
 fn release_keyboard(app: &AppHandle) {
-    let _ = app.run_on_main_thread(|| {
-        for w in gtk::Window::list_toplevels() {
-            if let Ok(win) = w.downcast::<gtk::ApplicationWindow>() {
-                win.set_keyboard_interactivity(false);
-            }
+    // Sobre la ventana del selector, no sobre todos los toplevels.
+    //
+    // `list_toplevels()` devuelve cualquier `ApplicationWindow` del proceso, así
+    // que esto podía llamar `set_keyboard_interactivity` sobre una ventana que
+    // nunca pasó por `init_layer_shell` — donde la llamada no significa nada, o
+    // significa otra cosa.
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(ventana) = handle.get_webview_window("main") else {
+            return;
+        };
+        let Ok(gtk_win) = ventana.gtk_window() else {
+            return;
+        };
+        if let Ok(win) = gtk_win.downcast::<gtk::ApplicationWindow>() {
+            win.set_keyboard_interactivity(false);
         }
     });
 }

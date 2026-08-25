@@ -58,6 +58,25 @@ fn traza(mensaje: &str) {
 const ANCHO_INICIAL: f64 = 320.0;
 const ALTO_INICIAL: f64 = 48.0;
 
+/// Medidas del selector, compartidas con `input.rs`.
+///
+/// Estaban sólo allá, y acá se mostraba la ventana con el tamaño del
+/// constructor: la primera vez después de cada desarme el selector abría en
+/// 320x48 en lugar de lo que necesitaban las variantes. Para la `a`, con siete,
+/// hacen falta 376x76 — la tarjeta salía cortada, y sólo se acomodaba en el
+/// siguiente uso.
+pub const ANCHO_ITEM: f64 = 48.0;
+pub const ANCHO_MARGEN: f64 = 40.0;
+pub const ALTO_VENTANA: f64 = 76.0;
+
+/// Tamaño que necesita el selector para `variantes` letras.
+pub fn tamano_para(variantes: usize) -> (f64, f64) {
+    (
+        ANCHO_ITEM * variantes.max(1) as f64 + ANCHO_MARGEN,
+        ALTO_VENTANA,
+    )
+}
+
 static READY: AtomicBool = AtomicBool::new(false);
 static CREATING: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -132,7 +151,7 @@ fn arm_teardown(app: &AppHandle) {
         std::thread::sleep(idle());
         if GENERATION.load(Ordering::SeqCst) == generation {
             traza("silencio: se desarma el selector");
-            teardown(&app);
+            teardown(&app, Some(generation));
         }
     });
 }
@@ -178,9 +197,19 @@ fn ensure_created(app: &AppHandle) {
                 // `show_picker` corre en el hilo del teclado justo después de
                 // `deliver` y puede no encontrarla todavía; y una ventana sin
                 // mapear no carga la página. Acá ya sabemos que existe.
-                let hay_pendiente = PENDIENTE.lock().map(|p| p.is_some()).unwrap_or(false);
-                if hay_pendiente {
-                    traza("hay un acento esperando: se mapea la ventana");
+                // Se lee cuántas variantes hay para darle el tamaño correcto:
+                // `show_picker` corre en el hilo del teclado y suele llegar
+                // antes de que esta ventana exista, así que sin esto la primera
+                // apertura de cada tanda quedaba con el tamaño del constructor.
+                let pendiente = PENDIENTE
+                    .lock()
+                    .unwrap_or_else(|envenenado| envenenado.into_inner())
+                    .as_ref()
+                    .map(|payload| payload.variants.len());
+                if let Some(variantes) = pendiente {
+                    let (ancho, alto) = tamano_para(variantes);
+                    traza(&format!("hay un acento esperando: {ancho}x{alto}"));
+                    let _ = ventana.set_size(tauri::LogicalSize::new(ancho, alto));
                     let _ = ventana.show();
                 }
             });
@@ -191,9 +220,21 @@ fn ensure_created(app: &AppHandle) {
     CREATING.store(false, Ordering::SeqCst);
 }
 
-fn teardown(app: &AppHandle) {
+fn teardown(app: &AppHandle, esperada: Option<u64>) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
+        // La generación se revalida **acá dentro**. `READY` se limpia en este
+        // cierre, no cuando salta el temporizador, así que entre la comprobación
+        // del hilo y esta línea `deliver` puede haber emitido el acento —viendo
+        // READY todavía en true, así que no lo encoló— y destruir la ventana en
+        // ese hueco lo perdía sin error: sólo se recuperaba con la tecla
+        // siguiente.
+        if let Some(esperada) = esperada {
+            if GENERATION.load(Ordering::SeqCst) != esperada {
+                traza("llegó un acento mientras se desarmaba: se cancela");
+                return;
+            }
+        }
         READY.store(false, Ordering::SeqCst);
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.destroy();

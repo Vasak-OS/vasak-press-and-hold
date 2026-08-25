@@ -200,7 +200,9 @@ fn decide(st: &mut State, code: u16, value: i32, now: Instant, is_target: bool) 
 #[derive(Clone, serde::Serialize)]
 pub struct AccentPayload {
     base_char: String,
-    variants: Vec<String>,
+    /// Público porque `picker_window` necesita cuántas hay para darle el tamaño
+    /// correcto a la ventana que crea.
+    pub variants: Vec<String>,
 }
 
 pub fn find_keyboard_devices() -> Vec<Device> {
@@ -481,7 +483,12 @@ fn run_action(
                         variants: vars.iter().map(|c| c.to_string()).collect(),
                     };
                     {
-                        let mut cv = current_variants.lock().unwrap();
+                        // Se recupera el guard en lugar de paniquear: un
+                        // `unwrap` acá mata el hilo del teclado y deja de
+                        // atender todas las teclas, no sólo los acentos.
+                        let mut cv = current_variants
+                            .lock()
+                            .unwrap_or_else(|envenenado| envenenado.into_inner());
                         *cv = vars.clone();
                     }
                     crate::picker_window::deliver(app, payload);
@@ -537,9 +544,9 @@ fn escribir(ch: char, char_kb: &mut Option<CharKeyboard>, vk: &VirtualKeyboard) 
 /// Medidas de la tarjeta, en la misma unidad que usa la página: cada variante
 /// es un cuadrado de 44 px con 4 px de separación, más el relleno de la
 /// tarjeta y lugar para la sombra.
-const ANCHO_ITEM: f64 = 48.0;
-const ANCHO_MARGEN: f64 = 40.0;
-const ALTO_VENTANA: f64 = 76.0;
+// Las medidas viven en `picker_window`, que también las necesita para dar el
+// tamaño correcto a la ventana que crea.
+use crate::picker_window::tamano_para;
 
 /// Pone el selector en pantalla.
 ///
@@ -558,10 +565,8 @@ fn show_picker(app: &AppHandle, variantes: usize) {
     // La ventana se ajusta a cuántas variantes hay. Con un ancho fijo, la `a`
     // —que tiene siete— no entraba, y la `n` —que tiene dos— dejaba la tarjeta
     // perdida en una ventana enorme. La tarjeta se centra sola adentro.
-    if let Err(e) = win.set_size(tauri::LogicalSize::new(
-        ANCHO_ITEM * variantes.max(1) as f64 + ANCHO_MARGEN,
-        ALTO_VENTANA,
-    )) {
+    let (ancho, alto) = tamano_para(variantes);
+    if let Err(e) = win.set_size(tauri::LogicalSize::new(ancho, alto)) {
         traza(&format!("no se pudo redimensionar: {e}"));
     }
 
