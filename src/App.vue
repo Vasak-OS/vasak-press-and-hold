@@ -38,6 +38,24 @@ onMounted(async () => {
     }),
   );
 
+  // Esta ventana se crea cuando el demonio la necesita, así que lo que hay que
+  // mostrar puede haber llegado antes de que Vue montara: en ese caso está
+  // anotado en el backend y no en un evento que ya pasó. Va después de
+  // suscribirse, o habría un hueco entre reclamar y escuchar.
+  //
+  // Lo normal es que devuelva nada: la ventana se suele crear por el
+  // calentamiento del keydown, y esa tecla muchas veces termina siendo un tap.
+  try {
+    const pendiente = await invoke<AccentPayload | null>('picker_ready');
+    if (pendiente) {
+      baseChar.value = pendiente.base_char;
+      variants.value = pendiente.variants;
+      visible.value = true;
+    }
+  } catch (error) {
+    console.error('No se pudo reclamar el acento pendiente', error);
+  }
+
   // Los colores, el radio y la tipografía salen de la configuración del
   // sistema, igual que en el resto de las aplicaciones. Va al final y sin
   // bloquear: si la configuración no se puede leer, el selector tiene que

@@ -77,7 +77,7 @@ impl VirtualKeyboard {
     pub fn new() -> Result<Self, String> {
         unsafe {
             let fd = libc::open(
-                b"/dev/uinput\0".as_ptr() as *const _,
+                c"/dev/uinput".as_ptr(),
                 libc::O_RDWR | libc::O_NONBLOCK,
             );
             if fd < 0 {
