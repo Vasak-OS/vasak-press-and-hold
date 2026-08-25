@@ -198,9 +198,11 @@ fn decide(st: &mut State, code: u16, value: i32, now: Instant, is_target: bool) 
 }
 
 #[derive(Clone, serde::Serialize)]
-struct AccentPayload {
+pub struct AccentPayload {
     base_char: String,
-    variants: Vec<String>,
+    /// Público porque `picker_window` necesita cuántas hay para darle el tamaño
+    /// correcto a la ventana que crea.
+    pub variants: Vec<String>,
 }
 
 pub fn find_keyboard_devices() -> Vec<Device> {
@@ -211,7 +213,7 @@ pub fn find_keyboard_devices() -> Vec<Device> {
             if path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map_or(false, |n| n.starts_with("event"))
+                .is_some_and(|n| n.starts_with("event"))
             {
                 if let Ok(device) = Device::open(&path) {
                     // Never our own virtual keyboard.
@@ -404,6 +406,15 @@ pub fn run_input_loop(
                         InputEventKind::Key(key) => {
                             let code = key.code();
                             let is_target = key_to_base_char(code).is_some();
+                            // La tecla bajó y tiene variantes: si el selector
+                            // está frío, se empieza a construir ahora. Abre
+                            // recién a los HOLD_THRESHOLD ms, así que la
+                            // creación queda escondida detrás del gesto que la
+                            // persona ya está haciendo. Con el selector tibio
+                            // esto no hace nada, así que escribir no cuesta.
+                            if is_target && event.value() == 1 {
+                                crate::picker_window::warm_up(&app_handle);
+                            }
                             let actions = decide(
                                 &mut state,
                                 code,
@@ -443,6 +454,155 @@ pub fn run_input_loop(
 
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+
+/// Carries out one decision.
+fn run_action(
+    action: Action,
+    vk: &VirtualKeyboard,
+    char_kb: &mut Option<CharKeyboard>,
+    app: &AppHandle,
+    variants_map: &HashMap<char, Vec<char>>,
+    current_variants: &Arc<Mutex<Vec<char>>>,
+) {
+    match action {
+        Action::Tap(code) => {
+            let _ = vk.send_event(0x01, code, 1);
+            let _ = vk.send_event(0x01, code, 0);
+        }
+        Action::Forward(code, value) => {
+            let _ = vk.send_event(0x01, code, value);
+        }
+        Action::OpenPicker(code) => {
+            traza(&format!("OpenPicker code={code}"));
+            if let Some(base) = key_to_base_char(code) {
+                if let Some(vars) = variants_map.get(&base) {
+                    let payload = AccentPayload {
+                        base_char: base.to_string(),
+                        variants: vars.iter().map(|c| c.to_string()).collect(),
+                    };
+                    {
+                        // Se recupera el guard en lugar de paniquear: un
+                        // `unwrap` acá mata el hilo del teclado y deja de
+                        // atender todas las teclas, no sólo los acentos.
+                        let mut cv = current_variants
+                            .lock()
+                            .unwrap_or_else(|envenenado| envenenado.into_inner());
+                        *cv = vars.clone();
+                    }
+                    crate::picker_window::deliver(app, payload);
+                    show_picker(app, vars.len());
+                }
+            }
+        }
+        Action::Choose(index) => {
+            traza(&format!("Choose {index}"));
+            let chosen = current_variants
+                .lock()
+                .ok()
+                .and_then(|vars| vars.get(index).copied());
+            // The window goes away first: the character is typed into whatever
+            // had the keyboard, and that is never the picker.
+            hide_picker(app);
+            if let Some(ch) = chosen {
+                escribir(ch, char_kb, vk);
+            }
+        }
+        Action::ClosePicker => {
+            traza("ClosePicker");
+            hide_picker(app)
+        }
+    }
+}
+
+/// Escribe un carácter, con el teclado propio si lo hay.
+///
+/// La distribución del sistema queda de reserva: sirve para lo que el teclado
+/// ya tiene —la ñ en latinoamericano, por ejemplo— y para nada más, así que es
+/// mejor que nada pero no mucho más.
+fn escribir(ch: char, char_kb: &mut Option<CharKeyboard>, vk: &VirtualKeyboard) {
+    if let Some(kb) = char_kb.as_mut() {
+        match kb.type_char(ch) {
+            Ok(()) => return,
+            Err(e) => traza(&format!("teclado propio: {e}")),
+        }
+    }
+
+    // Que no se pueda escribir el acento elegido es una falla de verdad: la
+    // persona eligió una variante y no apareció nada. Va al registro aunque no
+    // esté puesta la traza.
+    let fallo = match char_to_xkb_keysym(ch) {
+        Some(keysym) => vk.send_keysym(keysym).err(),
+        None => Some(format!("'{ch}' no tiene equivalente en la distribución")),
+    };
+    if let Some(e) = fallo {
+        eprintln!("No se pudo escribir '{ch}': {e}");
+    }
+}
+
+/// Medidas de la tarjeta, en la misma unidad que usa la página: cada variante
+/// es un cuadrado de 44 px con 4 px de separación, más el relleno de la
+/// tarjeta y lugar para la sombra.
+// Las medidas viven en `picker_window`, que también las necesita para dar el
+// tamaño correcto a la ventana que crea.
+use crate::picker_window::tamano_para;
+
+/// Pone el selector en pantalla.
+///
+/// La mostraba la página al recibir el evento, y no se mapeaba nunca: quedaba
+/// en 0x0 e invisible, así que las variantes sólo se podían elegir a ciegas.
+/// La ventana la abre ahora el mismo lado que decide abrirla, y la página se
+/// ocupa únicamente de dibujar lo que hay adentro.
+fn show_picker(app: &AppHandle, variantes: usize) {
+    use tauri::Manager;
+
+    let Some(win) = app.get_webview_window("main") else {
+        traza("no hay ventana 'main'");
+        return;
+    };
+
+    // La ventana se ajusta a cuántas variantes hay. Con un ancho fijo, la `a`
+    // —que tiene siete— no entraba, y la `n` —que tiene dos— dejaba la tarjeta
+    // perdida en una ventana enorme. La tarjeta se centra sola adentro.
+    let (ancho, alto) = tamano_para(variantes);
+    if let Err(e) = win.set_size(tauri::LogicalSize::new(ancho, alto)) {
+        traza(&format!("no se pudo redimensionar: {e}"));
+    }
+
+    if let Err(e) = win.show() {
+        traza(&format!("no se pudo mostrar: {e}"));
+    }
+    traza(&format!(
+        "mostrada: visible={:?} tamaño={:?}",
+        win.is_visible(),
+        win.outer_size()
+    ));
+}
+
+/// Deja rastro de lo que decide el demonio, para cuando lo que se ve en
+/// pantalla y lo que el teclado creyó hacer no coinciden. Se activa con
+/// VASAK_PAH_DEBUG=1.
+fn traza(mensaje: &str) {
+    if std::env::var_os("VASAK_PAH_DEBUG").is_some() {
+        eprintln!("[press-and-hold] {mensaje}");
+    }
+}
+
+/// Takes the picker off the screen.
+///
+/// Hiding the window is what the person sees; the event is so the page forgets
+/// the variants it was showing, since it is the same window every time.
+fn hide_picker(app: &AppHandle) {
+    use tauri::Manager;
+
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+    let _ = app.emit("hide-accent-menu", ());
+    // Se cerró: si no se usa ningún acento por un rato largo, el webview entero
+    // se desarma y el demonio vuelve a costar lo que cuesta un demonio.
+    crate::picker_window::schedule_teardown(app);
 }
 
 #[cfg(test)]
@@ -616,146 +776,4 @@ mod tests {
             "la búsqueda devolvió nuestro propio teclado virtual: {names:?}"
         );
     }
-}
-
-/// Carries out one decision.
-fn run_action(
-    action: Action,
-    vk: &VirtualKeyboard,
-    char_kb: &mut Option<CharKeyboard>,
-    app: &AppHandle,
-    variants_map: &HashMap<char, Vec<char>>,
-    current_variants: &Arc<Mutex<Vec<char>>>,
-) {
-    match action {
-        Action::Tap(code) => {
-            let _ = vk.send_event(0x01, code, 1);
-            let _ = vk.send_event(0x01, code, 0);
-        }
-        Action::Forward(code, value) => {
-            let _ = vk.send_event(0x01, code, value);
-        }
-        Action::OpenPicker(code) => {
-            traza(&format!("OpenPicker code={code}"));
-            if let Some(base) = key_to_base_char(code) {
-                if let Some(vars) = variants_map.get(&base) {
-                    let payload = AccentPayload {
-                        base_char: base.to_string(),
-                        variants: vars.iter().map(|c| c.to_string()).collect(),
-                    };
-                    {
-                        let mut cv = current_variants.lock().unwrap();
-                        *cv = vars.clone();
-                    }
-                    let _ = app.emit("show-accent-menu", payload);
-                    show_picker(app, vars.len());
-                }
-            }
-        }
-        Action::Choose(index) => {
-            traza(&format!("Choose {index}"));
-            let chosen = current_variants
-                .lock()
-                .ok()
-                .and_then(|vars| vars.get(index).copied());
-            // The window goes away first: the character is typed into whatever
-            // had the keyboard, and that is never the picker.
-            hide_picker(app);
-            if let Some(ch) = chosen {
-                escribir(ch, char_kb, vk);
-            }
-        }
-        Action::ClosePicker => {
-            traza("ClosePicker");
-            hide_picker(app)
-        }
-    }
-}
-
-/// Escribe un carácter, con el teclado propio si lo hay.
-///
-/// La distribución del sistema queda de reserva: sirve para lo que el teclado
-/// ya tiene —la ñ en latinoamericano, por ejemplo— y para nada más, así que es
-/// mejor que nada pero no mucho más.
-fn escribir(ch: char, char_kb: &mut Option<CharKeyboard>, vk: &VirtualKeyboard) {
-    if let Some(kb) = char_kb.as_mut() {
-        match kb.type_char(ch) {
-            Ok(()) => return,
-            Err(e) => traza(&format!("teclado propio: {e}")),
-        }
-    }
-
-    // Que no se pueda escribir el acento elegido es una falla de verdad: la
-    // persona eligió una variante y no apareció nada. Va al registro aunque no
-    // esté puesta la traza.
-    let fallo = match char_to_xkb_keysym(ch) {
-        Some(keysym) => vk.send_keysym(keysym).err(),
-        None => Some(format!("'{ch}' no tiene equivalente en la distribución")),
-    };
-    if let Some(e) = fallo {
-        eprintln!("No se pudo escribir '{ch}': {e}");
-    }
-}
-
-/// Medidas de la tarjeta, en la misma unidad que usa la página: cada variante
-/// es un cuadrado de 44 px con 4 px de separación, más el relleno de la
-/// tarjeta y lugar para la sombra.
-const ANCHO_ITEM: f64 = 48.0;
-const ANCHO_MARGEN: f64 = 40.0;
-const ALTO_VENTANA: f64 = 76.0;
-
-/// Pone el selector en pantalla.
-///
-/// La mostraba la página al recibir el evento, y no se mapeaba nunca: quedaba
-/// en 0x0 e invisible, así que las variantes sólo se podían elegir a ciegas.
-/// La ventana la abre ahora el mismo lado que decide abrirla, y la página se
-/// ocupa únicamente de dibujar lo que hay adentro.
-fn show_picker(app: &AppHandle, variantes: usize) {
-    use tauri::Manager;
-
-    let Some(win) = app.get_webview_window("main") else {
-        traza("no hay ventana 'main'");
-        return;
-    };
-
-    // La ventana se ajusta a cuántas variantes hay. Con un ancho fijo, la `a`
-    // —que tiene siete— no entraba, y la `n` —que tiene dos— dejaba la tarjeta
-    // perdida en una ventana enorme. La tarjeta se centra sola adentro.
-    if let Err(e) = win.set_size(tauri::LogicalSize::new(
-        ANCHO_ITEM * variantes.max(1) as f64 + ANCHO_MARGEN,
-        ALTO_VENTANA,
-    )) {
-        traza(&format!("no se pudo redimensionar: {e}"));
-    }
-
-    if let Err(e) = win.show() {
-        traza(&format!("no se pudo mostrar: {e}"));
-    }
-    traza(&format!(
-        "mostrada: visible={:?} tamaño={:?}",
-        win.is_visible(),
-        win.outer_size()
-    ));
-}
-
-/// Deja rastro de lo que decide el demonio, para cuando lo que se ve en
-/// pantalla y lo que el teclado creyó hacer no coinciden. Se activa con
-/// VASAK_PAH_DEBUG=1.
-fn traza(mensaje: &str) {
-    if std::env::var_os("VASAK_PAH_DEBUG").is_some() {
-        eprintln!("[press-and-hold] {mensaje}");
-    }
-}
-
-/// Takes the picker off the screen.
-///
-/// Hiding the window is what the person sees; the event is so the page forgets
-/// the variants it was showing, since it is the same window every time.
-fn hide_picker(app: &AppHandle) {
-    use tauri::Manager;
-
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
-    }
-    let _ = app.emit("hide-accent-menu", ());
 }

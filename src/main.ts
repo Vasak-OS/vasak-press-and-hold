@@ -3,6 +3,44 @@ import { createPinia } from 'pinia';
 import App from '@/App.vue';
 import '@/assets/main.css';
 
+/**
+ * Saca de una URL lo que no debería quedar en un registro.
+ *
+ * Se conserva el esquema y la autoridad completos usando `href`, y no
+ * `origin + pathname`: para esquemas propios como `asset:` o `ipc:` el `origin`
+ * es la cadena «null», así que esa forma escribía `null/ruta` y perdía
+ * justamente lo que permite entender qué se bloqueó.
+ */
+const sanearUrl = (valor: string | null | undefined): string => {
+	if (!valor) {
+		return '(en línea)';
+	}
+	try {
+		const url = new URL(valor);
+		if (url.protocol === 'data:') {
+			return 'data:(recortado)';
+		}
+		// Credenciales, query y fragmento: ahí es donde viajan los tokens.
+		url.username = '';
+		url.password = '';
+		url.search = '';
+		url.hash = '';
+		return url.href;
+	} catch {
+		// No era una URL absoluta —'inline', 'eval', una ruta relativa—: tal cual.
+		return valor;
+	}
+};
+
+document.addEventListener('securitypolicyviolation', (evento) => {
+	// Se sanean **las dos** URLs. `sourceFile` también puede llevar query con
+	// datos sensibles, y antes se escribía sin tocar.
+	console.error(
+		`[CSP] bloqueado ${sanearUrl(evento.blockedURI)} por la directiva ` +
+			`«${evento.violatedDirective}» en ${sanearUrl(evento.sourceFile) || 'documento'}:${evento.lineNumber}`
+	);
+});
+
 // El selector se dibuja sobre lo que estés escribiendo, así que arranca en
 // oscuro: la configuración del sistema lo corrige apenas se lee.
 document.documentElement.classList.add('dark');

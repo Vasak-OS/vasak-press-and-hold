@@ -147,7 +147,7 @@ fn keymap_for(chars: &[char]) -> String {
 /// cosa. La ñ es la variante número 15, o sea el keycode 16, que en cualquier
 /// distribución es la Q: mantener la n y elegir la ñ escribía «q».
 fn memfd(contents: &str) -> Result<(OwnedFd, u32), String> {
-    let fd = unsafe { libc::memfd_create(b"vasak-keymap\0".as_ptr() as *const _, 0) };
+    let fd = unsafe { libc::memfd_create(c"vasak-keymap".as_ptr(), 0) };
     if fd < 0 {
         return Err(format!(
             "no se pudo crear el archivo del mapa: {}",
@@ -228,7 +228,6 @@ mod tests {
     /// frontera.
     #[test]
     fn el_mapa_llega_terminado_en_cero() {
-        use std::io::Read;
         use std::os::fd::AsRawFd;
 
         let chars = ['é', 'ñ'];
