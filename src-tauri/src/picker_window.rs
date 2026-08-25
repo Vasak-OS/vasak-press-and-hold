@@ -79,6 +79,14 @@ pub fn warm_up(app: &AppHandle) {
         return;
     }
     ensure_created(app);
+    // Y se le arma el reloj del desarme.
+    //
+    // La mayoría de las teclas que calientan la ventana terminan siendo un tap,
+    // así que el selector nunca se abre y `hide_picker` —que es quien programa
+    // el desarme— no llega a correr nunca. Sin esto, escribir una sola vocal
+    // dejaba el webview levantado hasta cerrar la sesión, que es justo lo que
+    // este módulo vino a evitar.
+    arm_teardown(app);
 }
 
 /// Deja anotado qué mostrar y lo emite si el frontend ya está escuchando.
@@ -107,7 +115,15 @@ pub fn schedule_teardown(app: &AppHandle) {
         let mut pendiente = PENDIENTE.lock().unwrap_or_else(|e| e.into_inner());
         *pendiente = None;
     }
+    arm_teardown(app);
+}
 
+/// Programa el desarme sin tocar lo que haya pendiente.
+///
+/// Separado de [`schedule_teardown`] porque el calentamiento también necesita
+/// armarlo, y ahí puede haber un acento en camino: borrar la cola desde el
+/// `keydown` se llevaría el selector que está a punto de abrirse.
+fn arm_teardown(app: &AppHandle) {
     let generation = touch();
     let app = app.clone();
     // Un hilo y no una tarea async: este proceso no tiene runtime de tokio, y
@@ -130,43 +146,49 @@ fn ensure_created(app: &AppHandle) {
     }
 
     let app = app.clone();
-    let result = app.clone().run_on_main_thread(move || {
-        let built = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
-            .title("Accents")
-            .inner_size(ANCHO_INICIAL, ALTO_INICIAL)
-            .decorations(false)
-            .transparent(true)
-            .skip_taskbar(true)
-            .resizable(false)
-            .always_on_top(true)
-            .visible(false)
-            .build();
+    // Se construye desde este hilo, **no** dentro de `run_on_main_thread`.
+    //
+    // Tauri despacha la creación al bucle de eventos por su cuenta; hacerlo a
+    // mano desde dentro de una vuelta del bucle de GTK reentra en él y el
+    // webview queda a medio inicializar. Pero el trabajo de GTK —el
+    // layer-shell— sí tiene que ir en el hilo principal o aborta con «GTK may
+    // only be used from the main thread». Son dos requisitos opuestos y hay que
+    // respetar los dos.
+    let built = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+        .title("Accents")
+        .inner_size(ANCHO_INICIAL, ALTO_INICIAL)
+        .decorations(false)
+        .transparent(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .always_on_top(true)
+        .visible(false)
+        .build();
 
-        match built {
-            Ok(window) => {
-                crate::attach_layer_shell(&window);
+    match built {
+        Ok(_) => {
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let Some(ventana) = handle.get_webview_window("main") else {
+                    return;
+                };
+                crate::attach_layer_shell(&ventana);
                 // Si ya hay algo que mostrar, mapear la ventana ahora.
                 //
-                // `show_picker` corre en el hilo del teclado inmediatamente
-                // después de `deliver`, y la construcción de la ventana es
-                // asíncrona: cuando llega a buscarla puede no existir todavía y
-                // se va sin mostrar nada. Como además un webview cuya ventana no
-                // se mapeó no carga la página, esa carrera dejaba el selector
-                // esperando para siempre. Acá ya sabemos que la ventana existe.
+                // `show_picker` corre en el hilo del teclado justo después de
+                // `deliver` y puede no encontrarla todavía; y una ventana sin
+                // mapear no carga la página. Acá ya sabemos que existe.
                 let hay_pendiente = PENDIENTE.lock().map(|p| p.is_some()).unwrap_or(false);
                 if hay_pendiente {
                     traza("hay un acento esperando: se mapea la ventana");
-                    let _ = window.show();
+                    let _ = ventana.show();
                 }
-            }
-            Err(error) => eprintln!("[press-and-hold] no se pudo crear el selector: {error}"),
+            });
         }
-        CREATING.store(false, Ordering::SeqCst);
-    });
-
-    if result.is_err() {
-        CREATING.store(false, Ordering::SeqCst);
+        Err(error) => eprintln!("[press-and-hold] no se pudo crear el selector: {error}"),
     }
+
+    CREATING.store(false, Ordering::SeqCst);
 }
 
 fn teardown(app: &AppHandle) {

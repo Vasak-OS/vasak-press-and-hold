@@ -115,6 +115,15 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![select_accent, picker_ready])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            // Este proceso es un servicio de teclado, no una ventana. Tauri
+            // cierra la aplicación al destruirse la última ventana, y el
+            // selector ahora se desarma tras diez minutos sin acentos: sin esto
+            // el demonio se apagaba solo y dejaba de atender el teclado.
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }
