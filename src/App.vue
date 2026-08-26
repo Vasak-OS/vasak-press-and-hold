@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useConfigStore } from '@vasakgroup/plugin-config-manager';
-import { ref, onMounted, onUnmounted } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
 
 interface AccentPayload {
-  base_char: string;
-  variants: string[];
+	base_char: string;
+	variants: string[];
 }
 
 const visible = ref(false);
@@ -23,64 +23,66 @@ const unlisten: Array<() => void> = [];
 // escribiendo. Los números los atiende el demonio, que ya tiene el teclado
 // tomado en exclusiva.
 onMounted(async () => {
-  unlisten.push(
-    await listen<AccentPayload>('show-accent-menu', (event) => {
-      baseChar.value = event.payload.base_char;
-      variants.value = event.payload.variants;
-      visible.value = true;
-    }),
-  );
+	unlisten.push(
+		await listen<AccentPayload>('show-accent-menu', (event) => {
+			baseChar.value = event.payload.base_char;
+			variants.value = event.payload.variants;
+			visible.value = true;
+		})
+	);
 
-  unlisten.push(
-    await listen('hide-accent-menu', () => {
-      visible.value = false;
-      variants.value = [];
-    }),
-  );
+	unlisten.push(
+		await listen('hide-accent-menu', () => {
+			visible.value = false;
+			variants.value = [];
+		})
+	);
 
-  // Esta ventana se crea cuando el demonio la necesita, así que lo que hay que
-  // mostrar puede haber llegado antes de que Vue montara: en ese caso está
-  // anotado en el backend y no en un evento que ya pasó. Va después de
-  // suscribirse, o habría un hueco entre reclamar y escuchar.
-  //
-  // Lo normal es que devuelva nada: la ventana se suele crear por el
-  // calentamiento del keydown, y esa tecla muchas veces termina siendo un tap.
-  try {
-    const pendiente = await invoke<AccentPayload | null>('picker_ready');
-    if (pendiente) {
-      baseChar.value = pendiente.base_char;
-      variants.value = pendiente.variants;
-      visible.value = true;
-    }
-  } catch (error) {
-    console.error('No se pudo reclamar el acento pendiente', error);
-  }
+	// Esta ventana se crea cuando el demonio la necesita, así que lo que hay que
+	// mostrar puede haber llegado antes de que Vue montara: en ese caso está
+	// anotado en el backend y no en un evento que ya pasó. Va después de
+	// suscribirse, o habría un hueco entre reclamar y escuchar.
+	//
+	// Lo normal es que devuelva nada: la ventana se suele crear por el
+	// calentamiento del keydown, y esa tecla muchas veces termina siendo un tap.
+	try {
+		const pendiente = await invoke<AccentPayload | null>('picker_ready');
+		if (pendiente) {
+			baseChar.value = pendiente.base_char;
+			variants.value = pendiente.variants;
+			visible.value = true;
+		}
+	} catch (error) {
+		console.error('No se pudo reclamar el acento pendiente', error);
+	}
 
-  // Los colores, el radio y la tipografía salen de la configuración del
-  // sistema, igual que en el resto de las aplicaciones. Va al final y sin
-  // bloquear: si la configuración no se puede leer, el selector tiene que
-  // aparecer igual, con los colores por defecto.
-  try {
-    const configStore = useConfigStore() as any;
-    await configStore.loadConfig();
-    unlisten.push(
-      await listen('config-changed', () => {
-        configStore.loadConfig();
-      }),
-    );
-  } catch (error) {
-    console.error('No se pudo leer la configuración de Vasak', error);
-  }
+	// Los colores, el radio y la tipografía salen de la configuración del
+	// sistema, igual que en el resto de las aplicaciones. Va al final y sin
+	// bloquear: si la configuración no se puede leer, el selector tiene que
+	// aparecer igual, con los colores por defecto.
+	try {
+		const configStore = useConfigStore() as any;
+		await configStore.loadConfig();
+		unlisten.push(
+			await listen('config-changed', () => {
+				configStore.loadConfig();
+			})
+		);
+	} catch (error) {
+		console.error('No se pudo leer la configuración de Vasak', error);
+	}
 });
 
 onUnmounted(() => {
-  unlisten.forEach((off) => off());
+	unlisten.forEach((off) => {
+		off();
+	});
 });
 
 /** El clic sigue siendo una manera válida de elegir: el ratón sí llega acá. */
 async function select(index: number) {
-  visible.value = false;
-  await invoke('select_accent', { index });
+	visible.value = false;
+	await invoke('select_accent', { index });
 }
 </script>
 
