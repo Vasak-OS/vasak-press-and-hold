@@ -331,22 +331,41 @@ fn soltar(devices: &mut [Device]) {
     }
 }
 
-/// Vuelve a buscar los teclados y los toma. Se usa al despertar.
+/// Suelta lo que haya y vuelve a buscar los teclados desde cero. Se usa al
+/// despertar.
+///
+/// Recibe la lista y la reemplaza, en vez de devolver una nueva, **por el
+/// orden**: soltar tiene que pasar antes de volver a tomar, y con dos llamadas
+/// separadas el orden queda librado a quien las escriba. Con
+/// `devices = volver_a_tomar()` quedaba al revés, porque Rust evalúa el lado
+/// derecho antes de soltar el valor viejo: los descriptores de antes seguían
+/// agarrando el teclado mientras se intentaba tomarlo de nuevo, `EVIOCGRAB`
+/// contestaba `EBUSY` —el kernel sólo admite un cliente por dispositivo— y el
+/// teclado se descartaba de la lista. Quedaba sin acentos hasta reiniciar el
+/// servicio.
+///
+/// No pasaba mientras la señal de «me voy a dormir» llegara, porque esa ya había
+/// soltado todo. Dependía de recibir las dos mitades, y una de ellas se puede
+/// perder: la suscripción a D-Bus tarda en armarse, y una suspensión en ese
+/// hueco no avisa. Así el despertar se arregla solo, haya llegado o no.
 ///
 /// Se enumera de cero en vez de reusar lo que había: si el dispositivo se fue y
 /// volvió es otro nodo, y el descriptor viejo no apunta a nada. Los teclados
 /// virtuales se filtran solos —`find_keyboard_devices` ya los descarta—, así que
 /// el nuestro no se toma a sí mismo.
-fn volver_a_tomar() -> Vec<Device> {
-    let mut devices = find_keyboard_devices();
-    tomar_en_exclusiva(&mut devices);
+fn volver_a_tomar(devices: &mut Vec<Device>) {
+    soltar(devices);
+    devices.clear();
+
+    *devices = find_keyboard_devices();
+    tomar_en_exclusiva(devices);
+
     if devices.is_empty() {
         eprintln!(
             "Al despertar no se pudo tomar ningún teclado. El teclado funciona, \
              pero sin acentos hasta reiniciar vasak-press-and-hold."
         );
     }
-    devices
 }
 
 pub fn run_input_loop(
@@ -463,7 +482,7 @@ pub fn run_input_loop(
                     hide_picker(&app_handle);
                 }
                 crate::energia::Energia::Desperto => {
-                    devices = volver_a_tomar();
+                    volver_a_tomar(&mut devices);
                     fallos.anotar(true);
                 }
             }
@@ -952,6 +971,58 @@ mod tests {
     /// The bug that locked the machine: the virtual keyboard declares every
     /// keycode, so it matches the same search that looks for real keyboards. When
     /// it ended up in that list it got grabbed too, and every key replayed
+    /// Al despertar se suelta antes de volver a tomar, y el orden es el arreglo.
+    ///
+    /// El kernel admite **un solo** cliente con `EVIOCGRAB` por dispositivo: el
+    /// segundo recibe `EBUSY`. Con `devices = volver_a_tomar()` el lado derecho
+    /// se evaluaba antes de soltar el valor viejo, así que el daemon competía
+    /// contra sus propios descriptores y se quedaba sin ningún teclado —sin
+    /// acentos hasta reiniciar el servicio—. No se notaba mientras la señal de
+    /// «me voy a dormir» llegara, porque ésa ya había soltado todo; se notaba
+    /// cuando esa mitad se perdía.
+    ///
+    /// Esta prueba hace justamente eso: toma los teclados, y **sin soltarlos**
+    /// llama a la función del despertar. Si el orden estuviera mal, la lista
+    /// volvería vacía.
+    ///
+    /// Ignorada por defecto porque toma el teclado de verdad: mientras corre,
+    /// esta máquina no escribe en ninguna otra parte. Son milisegundos y suelta
+    /// al terminar, pero no es algo para meter en una corrida automática.
+    /// `cargo test -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn al_despertar_se_recupera_aunque_los_teclados_sigan_tomados() {
+        let mut devices = find_keyboard_devices();
+        if devices.is_empty() {
+            eprintln!("sin teclados que tomar: no hay nada que probar");
+            return;
+        }
+        tomar_en_exclusiva(&mut devices);
+        let cuantos = devices.len();
+        if cuantos == 0 {
+            // `EBUSY` acá quiere decir que el daemon está corriendo y ya los
+            // tiene: es el mismo límite de un cliente por dispositivo que hace
+            // falta arreglar, visto desde afuera. Parar el servicio y repetir.
+            eprintln!(
+                "no se pudo tomar ninguno: o faltan permisos, o el daemon está \
+                 corriendo y ya los tiene. No hay nada que probar."
+            );
+            return;
+        }
+
+        // Sin soltar nada: es el estado en que queda el daemon si se pierde la
+        // señal de que la máquina se iba a dormir.
+        volver_a_tomar(&mut devices);
+
+        assert_eq!(
+            devices.len(),
+            cuantos,
+            "se perdieron teclados al despertar: el orden de soltar y tomar está mal"
+        );
+
+        soltar(&mut devices);
+    }
+
     /// through it was captured by this process instead of reaching the
     /// compositor — the keyboard went dead and only killing the daemon from
     /// another machine or a TTY brought it back.
