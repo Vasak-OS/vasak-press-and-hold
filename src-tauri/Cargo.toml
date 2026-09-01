@@ -26,6 +26,11 @@ libc = "0.2"
 base64 = "0.22"
 wayland-client = "0.31"
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
+# Para escuchar `PrepareForSleep` de logind: es lo que avisa que la máquina se
+# va a dormir y que despertó. Sin eso el daemon se queda con teclados tomados
+# que ya no leen nada. La API bloqueante alcanza —vive en su propio hilo— y así
+# no entra tokio.
+zbus = "4"
 
 [profile.dev]
 incremental = true # Compile your binary in smaller steps.

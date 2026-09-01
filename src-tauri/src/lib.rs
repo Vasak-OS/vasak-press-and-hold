@@ -1,5 +1,6 @@
 mod accent_map;
 mod char_input;
+mod energia;
 mod input;
 mod picker_window;
 mod uinput;
