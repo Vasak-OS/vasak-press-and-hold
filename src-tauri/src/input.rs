@@ -256,11 +256,108 @@ pub fn find_keyboard_devices() -> Vec<Device> {
 const UINPUT_ATTEMPTS: u32 = 10;
 const UINPUT_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Cuántas teclas seguidas se pueden perder antes de soltar los teclados.
+///
+/// No es cero porque un fallo aislado escribiendo en uinput no justifica quedarse
+/// sin acentos, y no es grande porque cada intento fallido es una tecla que la
+/// persona apretó y no llegó a ninguna parte. Tres es lo que se nota como un
+/// tropiezo y no como un teclado roto.
+const FALLOS_ANTES_DE_SOLTAR: u32 = 3;
+
+/// Cuántas teclas seguidas se perdieron al replicarlas.
+///
+/// Cuenta **seguidas** y no en total: un tropiezo aislado a lo largo de un día
+/// entero no dice nada, y tres al hilo dicen que la reinyección dejó de andar.
+#[derive(Default)]
+struct Fallos(u32);
+
+impl Fallos {
+    /// Anota cómo salió una tecla. Una que sale bien borra las anteriores.
+    fn anotar(&mut self, salio_bien: bool) {
+        self.0 = if salio_bien { 0 } else { self.0 + 1 };
+    }
+
+    fn hay_que_soltar(&self) -> bool {
+        self.0 >= FALLOS_ANTES_DE_SOLTAR
+    }
+
+    fn cuantos(&self) -> u32 {
+        self.0
+    }
+}
+
+/// Toma los teclados en exclusiva y los deja en modo no bloqueante.
+///
+/// Los que no se pueden tomar se descartan de la lista en vez de usarse: todo lo
+/// que se teclea se replica por el teclado virtual, así que un dispositivo que
+/// siguió entregando al compositor manda cada tecla dos veces. Sin acentos en
+/// ese teclado es mucho mejor que letras duplicadas en él.
+fn tomar_en_exclusiva(devices: &mut Vec<Device>) {
+    devices.retain_mut(|device| match device.grab() {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "No se pudo tomar el control exclusivo de {}: {error}. \
+                 Se ignora ese teclado para no duplicar lo que escribas. \
+                 Suele ser permisos: revisá /dev/input/event* y las reglas de udev.",
+                device.name().unwrap_or("teclado desconocido")
+            );
+            false
+        }
+    });
+
+    for device in devices.iter_mut() {
+        unsafe {
+            let fd = device.as_raw_fd();
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+}
+
+/// Suelta todos los teclados. Desde acá los ve el compositor otra vez.
+///
+/// Es lo que separa «los acentos dejaron de andar» de «el teclado no responde»:
+/// mientras este proceso los tenga tomados, nada de lo que se escriba llega a
+/// ninguna parte si la reinyección falla.
+fn soltar(devices: &mut [Device]) {
+    for device in devices.iter_mut() {
+        if let Err(error) = device.ungrab() {
+            eprintln!(
+                "No se pudo soltar {}: {error}",
+                device.name().unwrap_or("teclado desconocido")
+            );
+        }
+    }
+}
+
+/// Vuelve a buscar los teclados y los toma. Se usa al despertar.
+///
+/// Se enumera de cero en vez de reusar lo que había: si el dispositivo se fue y
+/// volvió es otro nodo, y el descriptor viejo no apunta a nada. Los teclados
+/// virtuales se filtran solos —`find_keyboard_devices` ya los descarta—, así que
+/// el nuestro no se toma a sí mismo.
+fn volver_a_tomar() -> Vec<Device> {
+    let mut devices = find_keyboard_devices();
+    tomar_en_exclusiva(&mut devices);
+    if devices.is_empty() {
+        eprintln!(
+            "Al despertar no se pudo tomar ningún teclado. El teclado funciona, \
+             pero sin acentos hasta reiniciar vasak-press-and-hold."
+        );
+    }
+    devices
+}
+
 pub fn run_input_loop(
     app_handle: AppHandle,
     inject_rx: mpsc::Receiver<InjectCommand>,
     current_variants: Arc<Mutex<Vec<char>>>,
 ) {
+    // Suspender y despertar. Se arma antes de tomar nada: si la señal llega
+    // mientras se está preparando, el canal la guarda.
+    let (energia_tx, energia_rx) = mpsc::channel();
+    crate::energia::escuchar(energia_tx);
     // The real keyboards are enumerated first, while the virtual one does not
     // exist yet, so it cannot end up in this list. The order used to be the
     // other way round and that was enough to lock the machine: the virtual
@@ -313,18 +410,7 @@ pub fn run_input_loop(
     // keystroke arrives twice. A device that cannot be grabbed is therefore
     // dropped rather than used: no accents on that keyboard is a far better
     // outcome than doubled letters on it.
-    devices.retain_mut(|device| match device.grab() {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!(
-                "No se pudo tomar el control exclusivo de {}: {error}. \
-                 Se ignora ese teclado para no duplicar lo que escribas. \
-                 Suele ser permisos: revisá /dev/input/event* y las reglas de udev.",
-                device.name().unwrap_or("teclado desconocido")
-            );
-            false
-        }
-    });
+    tomar_en_exclusiva(&mut devices);
 
     if devices.is_empty() {
         eprintln!(
@@ -332,15 +418,6 @@ pub fn run_input_loop(
              desactivado. El teclado sigue funcionando normalmente."
         );
         return;
-    }
-
-    // Set devices to non-blocking mode
-    for device in &mut devices {
-        unsafe {
-            let fd = device.as_raw_fd();
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
     }
 
     let variants_map = get_variants();
@@ -366,7 +443,32 @@ pub fn run_input_loop(
     };
     let mut state = State::default();
 
+    let mut fallos = Fallos::default();
+
     loop {
+        // 0. Dormir y despertar.
+        //
+        // Va antes que nada: si la máquina está por suspender, lo único que
+        // importa es soltar los teclados antes de que se apague.
+        while let Ok(evento) = energia_rx.try_recv() {
+            match evento {
+                crate::energia::Energia::VaADormir => {
+                    soltar(&mut devices);
+                    devices.clear();
+                    // El estado se limpia junto con los teclados: una tecla que
+                    // quedó apretada al dormir nunca manda su release, y sin
+                    // esto el selector podía despertar abierto y comiéndose lo
+                    // que se escribiera.
+                    state = State::default();
+                    hide_picker(&app_handle);
+                }
+                crate::energia::Energia::Desperto => {
+                    devices = volver_a_tomar();
+                    fallos.anotar(true);
+                }
+            }
+        }
+
         // 1. Check inject channel
         while let Ok(cmd) = inject_rx.try_recv() {
             match cmd {
@@ -430,7 +532,7 @@ pub fn run_input_loop(
                                         .and_then(|base| variants_map.get(&base))
                                         .map_or(0, |vars| vars.len());
                                 }
-                                run_action(
+                                let salio = run_action(
                                     action,
                                     &vk,
                                     &mut char_kb,
@@ -438,6 +540,7 @@ pub fn run_input_loop(
                                     &variants_map,
                                     &current_variants,
                                 );
+                                fallos.anotar(salio);
                             }
                         }
                         InputEventKind::Synchronization(_) => {
@@ -452,12 +555,43 @@ pub fn run_input_loop(
             }
         }
 
+        // La red de seguridad.
+        //
+        // Si la reinyección viene fallando, cada tecla que se aprieta se pierde:
+        // los teclados de verdad están tomados y el compositor sólo ve el
+        // virtual. Soltarlos devuelve el teclado —sin acentos, pero **vivo**— y
+        // salir con error deja que systemd levante el daemon de nuevo con un
+        // teclado virtual nuevo, que es lo que suele arreglarlo.
+        //
+        // Salir sin soltar sería casi lo mismo, porque los descriptores se
+        // cierran igual, pero «casi» no alcanza para la única cosa que no puede
+        // fallar acá.
+        if fallos.hay_que_soltar() {
+            eprintln!(
+                "Se perdieron {} teclas seguidas al replicarlas por el teclado \
+                 virtual. Se sueltan los teclados para que vuelvan a funcionar y se \
+                 sale: systemd reinicia el daemon en unos segundos.",
+                fallos.cuantos()
+            );
+            soltar(&mut devices);
+            std::process::exit(1);
+        }
+
         std::thread::sleep(Duration::from_millis(1));
     }
 }
 
 
 /// Carries out one decision.
+/// Lleva a cabo una decisión. Devuelve `false` si no se pudo escribir en el
+/// teclado virtual.
+///
+/// Ese valor no es decorativo: los teclados de verdad están tomados en
+/// exclusiva, así que una tecla que no se logra replicar **no llega a ninguna
+/// parte**. Antes se descartaba el error —`let _ = vk.send_event(...)`— y el
+/// resultado era un teclado que no responde, sin una sola línea en el registro
+/// que dijera por qué. Quien lo sufría no tenía cómo llegar ni a una terminal:
+/// los atajos del compositor pasan por acá también.
 fn run_action(
     action: Action,
     vk: &VirtualKeyboard,
@@ -465,14 +599,21 @@ fn run_action(
     app: &AppHandle,
     variants_map: &HashMap<char, Vec<char>>,
     current_variants: &Arc<Mutex<Vec<char>>>,
-) {
+) -> bool {
     match action {
         Action::Tap(code) => {
-            let _ = vk.send_event(0x01, code, 1);
-            let _ = vk.send_event(0x01, code, 0);
+            let uno = vk.send_event(0x01, code, 1);
+            let dos = vk.send_event(0x01, code, 0);
+            if let Err(e) = uno.and(dos) {
+                eprintln!("No se pudo escribir la tecla {code} en el teclado virtual: {e}");
+                return false;
+            }
         }
         Action::Forward(code, value) => {
-            let _ = vk.send_event(0x01, code, value);
+            if let Err(e) = vk.send_event(0x01, code, value) {
+                eprintln!("No se pudo replicar la tecla {code} ({value}): {e}");
+                return false;
+            }
         }
         Action::OpenPicker(code) => {
             traza(&format!("OpenPicker code={code}"));
@@ -511,9 +652,10 @@ fn run_action(
         }
         Action::ClosePicker => {
             traza("ClosePicker");
-            hide_picker(app)
+            hide_picker(app);
         }
     }
+    true
 }
 
 /// Escribe un carácter, con el teclado propio si lo hay.
@@ -715,6 +857,69 @@ mod tests {
 
     /// Soltar la tecla sostenida no cierra el selector: se suelta, se mira y
     /// recién ahí se elige.
+    /// La red que evita que un fallo replicando deje el teclado muerto.
+    ///
+    /// Los teclados de verdad están tomados en exclusiva, así que una tecla que
+    /// no se logra escribir en el virtual no llega a ninguna parte. Si eso pasa
+    /// varias veces seguidas hay que soltarlos: sin acentos se vive, sin teclado
+    /// hay que apagar la máquina del botón.
+    #[test]
+    fn tres_teclas_perdidas_seguidas_sueltan_los_teclados() {
+        let mut f = Fallos::default();
+        assert!(!f.hay_que_soltar(), "recién arrancado no suelta nada");
+
+        f.anotar(false);
+        f.anotar(false);
+        assert!(!f.hay_que_soltar(), "dos no alcanzan: un tropiezo no es una falla");
+
+        f.anotar(false);
+        assert!(f.hay_que_soltar());
+        assert_eq!(f.cuantos(), 3);
+    }
+
+    #[test]
+    fn una_tecla_que_sale_bien_borra_las_perdidas() {
+        // Cuenta seguidas, no en total: dos fallos por mes no pueden acumularse
+        // hasta soltar los teclados un martes cualquiera.
+        let mut f = Fallos::default();
+        f.anotar(false);
+        f.anotar(false);
+        f.anotar(true);
+        assert_eq!(f.cuantos(), 0);
+
+        f.anotar(false);
+        f.anotar(false);
+        assert!(!f.hay_que_soltar(), "{}", f.cuantos());
+    }
+
+    /// Por qué al dormir se limpia el estado y no sólo se sueltan los teclados.
+    ///
+    /// Una tecla que quedó apretada cuando la máquina se durmió no manda nunca su
+    /// release. Si su código quedó en `swallowed`, el `decide` de después se come
+    /// todos los eventos de esa tecla que no sean presión: la tecla queda muerta
+    /// para siempre, o peor, apretada desde el punto de vista del compositor.
+    #[test]
+    fn el_estado_que_quedo_de_antes_de_dormir_no_sobrevive() {
+        let mut st = State::default();
+        st.picker.open = true;
+        st.picker.count = 5;
+        st.swallowed.push(KEY_ESC);
+        st.pending = Some(Pending {
+            code: 30,
+            pressed_at: Instant::now(),
+            picker_open: true,
+        });
+
+        // Con ese estado, Esc no produce nada: se lo come el `swallowed`.
+        let antes = decide(&mut st, KEY_ESC, 0, Instant::now(), false);
+        assert!(antes.is_empty(), "{antes:?}");
+
+        // Al despertar se arranca de cero, que es lo que hace el bucle.
+        let mut st = State::default();
+        let despues = decide(&mut st, KEY_ESC, 0, Instant::now(), false);
+        assert_eq!(despues, vec![Action::Forward(KEY_ESC, 0)]);
+    }
+
     #[test]
     fn soltar_la_tecla_sostenida_deja_el_selector_abierto() {
         let ahora = Instant::now();
