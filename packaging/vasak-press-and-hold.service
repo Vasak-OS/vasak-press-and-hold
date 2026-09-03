@@ -10,5 +10,53 @@ ExecStart=/usr/bin/vasak-press-and-hold
 Restart=on-failure
 RestartSec=3
 
+# Este proceso lee el teclado entero, tecla por tecla, antes que nadie: lo
+# necesita para saber que mantenés apretada una letra. Eso es exactamente lo que
+# hace un keylogger, y hasta acá corría sin una sola restricción. Es el que más
+# ganaba con esto.
+#
+# Sin red, y no es un detalle acá: lo que lee no tiene por dónde irse.
+RestrictAddressFamilies=AF_UNIX
+
+# Y de todo /dev sólo ve lo que usa. El teclado para leerlo, uinput para
+# devolver la letra elegida, la placa de video para dibujar el cuadrito. Nada
+# más: ni la cámara, ni el micrófono, ni los discos.
+#
+# Se hace con un /dev privado y tres montajes, y no con `DevicePolicy=closed` y
+# `DeviceAllow`, que es la forma que uno esperaría: comprobado a mano, en una
+# unidad **de usuario** ese filtro no se aplica —depende de un programa BPF que
+# el gestor sin privilegios no puede cargar—, así que ahí habría quedado de
+# adorno. Los montajes, en cambio, son espacios de nombres y sí funcionan.
+#
+# El `-` delante de los dos últimos es para que el servicio arranque igual si
+# todavía no existen; sin el dispositivo no anda, pero eso ya pasaba antes y es
+# mejor que no arrancar.
+PrivateDevices=yes
+BindPaths=/dev/input
+BindPaths=-/dev/uinput
+BindPaths=-/dev/dri
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ProtectSystem=full
+
+# `MemoryDenyWriteExecute` y `RestrictNamespaces` quedan afuera porque el cuadro
+# de acentos es una ventana Tauri: WebKit compila su JavaScript en memoria y usa
+# espacios de nombres para su propio aislamiento.
+
 [Install]
 WantedBy=graphical-session.target
