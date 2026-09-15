@@ -2,10 +2,11 @@ mod accent_map;
 mod char_input;
 mod energia;
 mod input;
+mod no_molestar;
 mod picker_window;
 mod uinput;
 
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 
 use gtk::prelude::Cast;
 use gtk_layer_shell::LayerShell;
@@ -120,9 +121,7 @@ pub fn run() {
             });
 
             let handle = app.handle().clone();
-            std::thread::spawn(move || {
-                input::run_input_loop(handle, inject_rx, current_variants)
-            });
+            std::thread::spawn(move || input::run_input_loop(handle, inject_rx, current_variants));
 
             Ok(())
         })
