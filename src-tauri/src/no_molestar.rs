@@ -162,11 +162,24 @@ fn bucle(ruta: &str, estado: &NoMolestar) {
     }
 }
 
+/// Cada cuánto se reconsulta aunque no haya llegado ningún evento.
+///
+/// El flujo de eventos es lo que hace que esto reaccione rápido, pero no puede
+/// ser lo **único**: si Wayfire deja de emitir con el socket todavía abierto, la
+/// espera se queda ahí para siempre y el booleano congelado. Congelado en
+/// `true` significa el selector apagado sin que nada lo diga, que es el modo de
+/// falla que hay que evitar.
+///
+/// Dos segundos: no está en el camino de ninguna tecla, así que sale barato, y
+/// acota a eso lo que puede durar un booleano viejo.
+const LATIDO: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn una_vuelta(ruta: &str, estado: &NoMolestar) -> std::io::Result<()> {
     // Dos conexiones: una queda escuchando eventos y la otra pregunta. Sobre una
     // sola, la respuesta a la pregunta llega mezclada con los eventos y hay que
     // desenredarlas.
     let mut eventos = UnixStream::connect(ruta)?;
+    eventos.set_read_timeout(Some(LATIDO))?;
     enviar(&mut eventos, "window-rules/events/watch")?;
 
     consultar(ruta, estado)?;
@@ -175,9 +188,27 @@ fn una_vuelta(ruta: &str, estado: &NoMolestar) -> std::io::Result<()> {
         // Cualquier evento significa «algo cambió»: se reconsulta en vez de
         // interpretar cada tipo. Es lo que hace `vasak-desktop`, y es lo que
         // sobrevive a que Wayfire agregue eventos nuevos.
-        leer(&mut eventos)?;
+        //
+        // Que se venza la espera no es un error: es el latido, y reconsulta
+        // igual. Sólo un corte de verdad sale del bucle a reconectar.
+        match leer(&mut eventos) {
+            Ok(_) => {}
+            Err(e) if es_solo_la_espera(&e) => {}
+            Err(e) => return Err(e),
+        }
         consultar(ruta, estado)?;
     }
+}
+
+/// Si el error es sólo que se venció la espera de lectura.
+///
+/// Los dos códigos porque cuál de los dos llega depende de cómo esté puesto el
+/// socket, y tratar uno de ellos como corte reconectaría cada dos segundos.
+pub fn es_solo_la_espera(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
 }
 
 fn consultar(ruta: &str, estado: &NoMolestar) -> std::io::Result<()> {
@@ -270,5 +301,35 @@ mod tests {
     #[test]
     fn una_respuesta_sin_los_campos_no_apaga_nada() {
         assert!(!del_json(&json!({"info": {"title": "algo"}})));
+    }
+
+    /// El latido no puede confundirse con un corte: si se tomara por corte, el
+    /// hilo reconectaría cada dos segundos para siempre.
+    #[test]
+    fn la_espera_vencida_no_es_un_corte() {
+        use std::io::{Error, ErrorKind};
+        assert!(es_solo_la_espera(&Error::from(ErrorKind::WouldBlock)));
+        assert!(es_solo_la_espera(&Error::from(ErrorKind::TimedOut)));
+    }
+
+    /// Y un corte de verdad sí tiene que salir a reconectar, o el booleano se
+    /// queda congelado contra un socket muerto.
+    #[test]
+    fn un_corte_de_verdad_si_lo_es() {
+        use std::io::{Error, ErrorKind};
+        for clase in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::UnexpectedEof,
+        ] {
+            assert!(!es_solo_la_espera(&Error::from(clase)), "{clase:?}");
+        }
+    }
+
+    /// El latido tiene que ser corto: es el techo de lo que puede durar un
+    /// booleano viejo cuando los eventos dejan de llegar.
+    #[test]
+    fn el_latido_es_corto() {
+        assert!(LATIDO <= std::time::Duration::from_secs(5));
     }
 }

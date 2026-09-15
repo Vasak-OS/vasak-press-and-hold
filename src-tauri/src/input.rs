@@ -158,6 +158,20 @@ fn decide(st: &mut State, code: u16, value: i32, now: Instant, is_target: bool) 
     }
 
     if !is_target {
+        // Y si esta misma tecla había quedado pendiente, se descarta.
+        //
+        // Pasa al entrar en modo juego con una letra apretada: la pulsación se
+        // tragó cuando todavía era tecla objetivo, y el release ya llega como
+        // tecla común. El bloque de arriba sólo limpia lo pendiente de **otra**
+        // tecla, así que sin esto `a` quedaba pendiente para siempre y salía
+        // como un `Tap` suelto mucho después, al apretar cualquier otra cosa.
+        //
+        // Se descarta en silencio y no se escribe: el evento crudo ya va a
+        // salir por el `Forward` de abajo, y sumarle un `Tap` sería escribir la
+        // letra dos veces.
+        if st.pending.as_ref().is_some_and(|p| p.code == code) {
+            st.pending = None;
+        }
         actions.push(Action::Forward(code, value));
         return actions;
     }
@@ -807,6 +821,35 @@ mod tests {
         let mut st = State::default();
         assert!(decide(&mut st, A, 1, ahora, true).is_empty());
         assert_eq!(decide(&mut st, A, 0, ahora, true), vec![Action::Tap(A)]);
+    }
+
+    /// Entrar en modo juego con una letra apretada no puede dejarla colgada.
+    ///
+    /// La pulsación se tragó cuando todavía era tecla objetivo; si el foco pasa
+    /// a un juego antes de soltarla, el release llega como tecla común. Sin
+    /// limpiar lo pendiente, esa `a` salía como un `Tap` suelto mucho después,
+    /// al apretar cualquier otra tecla — una letra fantasma en medio de otra
+    /// cosa.
+    #[test]
+    fn entrar_en_modo_juego_con_la_tecla_apretada_no_deja_una_letra_colgada() {
+        let ahora = Instant::now();
+        let mut st = State::default();
+
+        // Se aprieta `a` escribiendo normalmente: queda pendiente.
+        assert!(decide(&mut st, A, 1, ahora, true).is_empty());
+
+        // Un juego toma el foco y se suelta la tecla, ya como tecla común.
+        assert_eq!(
+            decide(&mut st, A, 0, ahora, false),
+            vec![Action::Forward(A, 0)]
+        );
+        assert!(st.pending.is_none(), "la tecla quedó pendiente");
+
+        // Y cualquier otra tecla no arrastra la letra vieja.
+        assert_eq!(
+            decide(&mut st, S, 1, ahora, false),
+            vec![Action::Forward(S, 1)]
+        );
     }
 
     /// Con un juego adelante la tecla se reenvía **al bajar**, entera y a
