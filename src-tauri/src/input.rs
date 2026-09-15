@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::os::unix::io::AsRawFd;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use evdev::{Device, InputEventKind, Key};
@@ -158,6 +158,20 @@ fn decide(st: &mut State, code: u16, value: i32, now: Instant, is_target: bool) 
     }
 
     if !is_target {
+        // Y si esta misma tecla había quedado pendiente, se descarta.
+        //
+        // Pasa al entrar en modo juego con una letra apretada: la pulsación se
+        // tragó cuando todavía era tecla objetivo, y el release ya llega como
+        // tecla común. El bloque de arriba sólo limpia lo pendiente de **otra**
+        // tecla, así que sin esto `a` quedaba pendiente para siempre y salía
+        // como un `Tap` suelto mucho después, al apretar cualquier otra cosa.
+        //
+        // Se descarta en silencio y no se escribe: el evento crudo ya va a
+        // salir por el `Forward` de abajo, y sumarle un `Tap` sería escribir la
+        // letra dos veces.
+        if st.pending.as_ref().is_some_and(|p| p.code == code) {
+            st.pending = None;
+        }
         actions.push(Action::Forward(code, value));
         return actions;
     }
@@ -377,6 +391,11 @@ pub fn run_input_loop(
     // mientras se está preparando, el canal la guarda.
     let (energia_tx, energia_rx) = mpsc::channel();
     crate::energia::escuchar(energia_tx);
+
+    // Quién está adelante. Se arma acá y no en cada tecla: preguntarle a Wayfire
+    // por cada pulsación serían cientos de idas y vueltas por segundo. Un hilo
+    // escucha sus eventos y deja un booleano; leerlo por tecla es un `load`.
+    let no_molestar = crate::no_molestar::vigilar();
     // The real keyboards are enumerated first, while the virtual one does not
     // exist yet, so it cannot end up in this list. The order used to be the
     // other way round and that was enough to lock the machine: the virtual
@@ -503,11 +522,8 @@ pub fn run_input_loop(
         // prende nunca —ni en el teclado ni para quien quiera leer ese estado—
         // aunque las mayúsculas se escriban bien.
         for (led, encendido) in vk.read_led_events() {
-            let evento = evdev::InputEvent::new(
-                evdev::EventType::LED,
-                led,
-                if encendido { 1 } else { 0 },
-            );
+            let evento =
+                evdev::InputEvent::new(evdev::EventType::LED, led, if encendido { 1 } else { 0 });
 
             for device in &mut devices {
                 if let Err(error) = device.send_events(&[evento]) {
@@ -526,7 +542,18 @@ pub fn run_input_loop(
                     match event.kind() {
                         InputEventKind::Key(key) => {
                             let code = key.code();
-                            let is_target = key_to_base_char(code).is_some();
+                            // Con un juego adelante, **ninguna** tecla es
+                            // objetivo: se reenvían todas tal cual. No alcanza
+                            // con no dibujar la ventana — una tecla objetivo no
+                            // se reenvía al bajar, así que manteniendo `A` el
+                            // juego no recibe nada y no se puede ni caminar.
+                            //
+                            // Se resuelve acá y no adentro de `decide` a
+                            // propósito: así la lógica del selector queda igual
+                            // que siempre y lo único que cambia es qué cuenta
+                            // como tecla objetivo.
+                            let is_target =
+                                key_to_base_char(code).is_some() && !no_molestar.activo();
                             // La tecla bajó y tiene variantes: si el selector
                             // está frío, se empieza a construir ahora. Abre
                             // recién a los HOLD_THRESHOLD ms, así que la
@@ -536,13 +563,8 @@ pub fn run_input_loop(
                             if is_target && event.value() == 1 {
                                 crate::picker_window::warm_up(&app_handle);
                             }
-                            let actions = decide(
-                                &mut state,
-                                code,
-                                event.value(),
-                                Instant::now(),
-                                is_target,
-                            );
+                            let actions =
+                                decide(&mut state, code, event.value(), Instant::now(), is_target);
                             for action in actions {
                                 // How many variants are on screen decides which
                                 // numbers the picker answers to.
@@ -599,7 +621,6 @@ pub fn run_input_loop(
         std::thread::sleep(Duration::from_millis(1));
     }
 }
-
 
 /// Carries out one decision.
 /// Lleva a cabo una decisión. Devuelve `false` si no se pudo escribir en el
@@ -802,6 +823,70 @@ mod tests {
         assert_eq!(decide(&mut st, A, 0, ahora, true), vec![Action::Tap(A)]);
     }
 
+    /// Entrar en modo juego con una letra apretada no puede dejarla colgada.
+    ///
+    /// La pulsación se tragó cuando todavía era tecla objetivo; si el foco pasa
+    /// a un juego antes de soltarla, el release llega como tecla común. Sin
+    /// limpiar lo pendiente, esa `a` salía como un `Tap` suelto mucho después,
+    /// al apretar cualquier otra tecla — una letra fantasma en medio de otra
+    /// cosa.
+    #[test]
+    fn entrar_en_modo_juego_con_la_tecla_apretada_no_deja_una_letra_colgada() {
+        let ahora = Instant::now();
+        let mut st = State::default();
+
+        // Se aprieta `a` escribiendo normalmente: queda pendiente.
+        assert!(decide(&mut st, A, 1, ahora, true).is_empty());
+
+        // Un juego toma el foco y se suelta la tecla, ya como tecla común.
+        assert_eq!(
+            decide(&mut st, A, 0, ahora, false),
+            vec![Action::Forward(A, 0)]
+        );
+        assert!(st.pending.is_none(), "la tecla quedó pendiente");
+
+        // Y cualquier otra tecla no arrastra la letra vieja.
+        assert_eq!(
+            decide(&mut st, S, 1, ahora, false),
+            vec![Action::Forward(S, 1)]
+        );
+    }
+
+    /// Con un juego adelante la tecla se reenvía **al bajar**, entera y a
+    /// tiempo.
+    ///
+    /// Es lo que hace jugable el asunto, y no es lo mismo que «no se dibuja la
+    /// ventana». Como tecla objetivo, `A` no se reenvía al apretarla: queda
+    /// pendiente y sale recién al soltar —o no sale, si se abrió el selector—.
+    /// O sea que manteniéndola el juego no recibe nada y no se puede ni caminar
+    /// a la izquierda, ni agacharse con `C`, ni mantener `E`.
+    ///
+    /// El `is_target: false` de acá es lo que produce `no_molestar` cuando
+    /// Wayfire dice que adelante hay un juego.
+    #[test]
+    fn con_un_juego_adelante_la_tecla_pasa_al_bajar_y_no_abre_nada() {
+        let ahora = Instant::now();
+        let mut st = State::default();
+
+        assert_eq!(
+            decide(&mut st, A, 1, ahora, false),
+            vec![Action::Forward(A, 1)],
+            "la pulsación tiene que llegar al juego en el momento, no al soltar"
+        );
+
+        // Y mantenerla no abre nada: lo que llegan son las repeticiones, que es
+        // lo que un juego espera.
+        let tarde = ahora + HOLD_THRESHOLD;
+        assert_eq!(
+            decide(&mut st, A, 2, tarde, false),
+            vec![Action::Forward(A, 2)]
+        );
+        assert_eq!(
+            decide(&mut st, A, 0, tarde, false),
+            vec![Action::Forward(A, 0)]
+        );
+    }
+
     /// Mantener apretado abre el selector y no escribe la letra base: eso lo
     /// hace después la variante elegida.
     #[test]
@@ -811,11 +896,16 @@ mod tests {
         decide(&mut st, A, 1, ahora, true);
 
         let tarde = ahora + HOLD_THRESHOLD;
-        assert_eq!(decide(&mut st, A, 2, tarde, true), vec![Action::OpenPicker(A)]);
-        assert!(decide(&mut st, A, 2, tarde, true).is_empty(), "el selector se abre una sola vez");
+        assert_eq!(
+            decide(&mut st, A, 2, tarde, true),
+            vec![Action::OpenPicker(A)]
+        );
+        assert!(
+            decide(&mut st, A, 2, tarde, true).is_empty(),
+            "el selector se abre una sola vez"
+        );
         assert!(decide(&mut st, A, 0, tarde, true).is_empty());
     }
-
 
     /// El motivo del cambio: la ventana no toma el teclado —si lo tomara, el
     /// acento se escribiría dentro del selector y no en tu documento—, así que
@@ -829,7 +919,10 @@ mod tests {
         st.picker.count = 5;
 
         const UNO: u16 = 2;
-        assert_eq!(decide(&mut st, UNO, 1, ahora, false), vec![Action::Choose(0)]);
+        assert_eq!(
+            decide(&mut st, UNO, 1, ahora, false),
+            vec![Action::Choose(0)]
+        );
         // Y no escribe el número: ni la bajada ni la subida llegan a nadie.
         assert!(decide(&mut st, UNO, 0, ahora, false).is_empty());
     }
@@ -846,7 +939,10 @@ mod tests {
 
         const NUEVE: u16 = 10;
         assert!(decide(&mut st, NUEVE, 1, ahora, false).is_empty());
-        assert!(st.picker.open, "el selector sigue abierto esperando una opción válida");
+        assert!(
+            st.picker.open,
+            "el selector sigue abierto esperando una opción válida"
+        );
     }
 
     /// Escape cierra sin escribir, y cualquier otra tecla cierra y sigue de
@@ -858,7 +954,10 @@ mod tests {
         decide(&mut st, A, 1, ahora, true);
         decide(&mut st, A, 2, ahora + HOLD_THRESHOLD, true);
         st.picker.count = 3;
-        assert_eq!(decide(&mut st, KEY_ESC, 1, ahora, false), vec![Action::ClosePicker]);
+        assert_eq!(
+            decide(&mut st, KEY_ESC, 1, ahora, false),
+            vec![Action::ClosePicker]
+        );
 
         // Otra vez, ahora con una tecla cualquiera.
         let mut st = State::default();
@@ -889,7 +988,10 @@ mod tests {
 
         f.anotar(false);
         f.anotar(false);
-        assert!(!f.hay_que_soltar(), "dos no alcanzan: un tropiezo no es una falla");
+        assert!(
+            !f.hay_que_soltar(),
+            "dos no alcanzan: un tropiezo no es una falla"
+        );
 
         f.anotar(false);
         assert!(f.hay_que_soltar());
@@ -1034,7 +1136,8 @@ mod tests {
     #[test]
     #[ignore]
     fn the_search_never_returns_our_own_virtual_keyboard() {
-        let _vk = crate::uinput::VirtualKeyboard::new().expect("no se pudo crear el teclado virtual");
+        let _vk =
+            crate::uinput::VirtualKeyboard::new().expect("no se pudo crear el teclado virtual");
         // The device shows up asynchronously; the constructor already waits, but
         // give udev room so a miss here means the filter worked, not that the
         // device was not there yet.
