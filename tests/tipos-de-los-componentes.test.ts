@@ -24,8 +24,28 @@ import { fileURLToPath } from 'node:url';
 // un checkout en una ruta con espacios mandaría a `Bun.Glob` y `Bun.file` a una
 // carpeta que no existe.
 const raiz = fileURLToPath(new URL('..', import.meta.url));
+/** Este mismo archivo, relativo a la raíz. */
+const propio = fileURLToPath(import.meta.url).slice(raiz.length);
 
-const fuentes = await Array.fromAsync(new Bun.Glob('src/**/*.{ts,d.ts,vue}').scan({ cwd: raiz }));
+/**
+ * Todo lo que el chequeo de tipos mira, no sólo `src`.
+ *
+ * El `tsconfig` de la raíz incluye también `tests/**` y los `.tsx`, y el de
+ * node los archivos de configuración sueltos. Una declaración puesta en
+ * cualquiera de esos lugares aplana los tipos igual, y con un patrón más
+ * angosto las pruebas de abajo pasarían sin haberla visto. Lo marcó la
+ * revisión.
+ */
+const fuentes = (
+	await Promise.all(
+		['src/**/*.{ts,tsx,mts,cts,vue}', 'tests/**/*.{ts,tsx,vue}', '*.{ts,mts,cts}'].map(
+			async (patron) => await Array.fromAsync(new Bun.Glob(patron).scan({ cwd: raiz }))
+		)
+	)
+).flat()
+	// Menos este archivo. Los patrones que busca los lleva escritos adentro,
+	// así que al ampliar el escaneo a `tests/` empezó a encontrarse a sí mismo.
+	.filter((ruta) => ruta !== propio);
 
 async function conteniendo(patron: RegExp): Promise<string[]> {
 	const hallados: string[] = [];
@@ -41,6 +61,11 @@ describe('los tipos de los componentes', () => {
 		// la lista viene vacía —una `raiz` mal armada y no hay nada que mirar—.
 		expect(fuentes).toContain('src/vite-env.d.ts');
 		expect(fuentes).toContain('src/main.ts');
+		// Y que los tres patrones traigan algo: el de `tests` y el de la raíz se
+		// sumaron porque el de `src` solo dejaba huecos, y un patrón que no
+		// encuentra nada los deja igual.
+		expect(fuentes.some((ruta) => ruta.startsWith('tests/'))).toBe(true);
+		expect(fuentes).toContain('vite.config.ts');
 		expect(fuentes.length).toBeGreaterThan(3);
 	});
 
