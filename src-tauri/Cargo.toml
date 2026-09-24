@@ -1,6 +1,6 @@
 [package]
 name = "vasak-press-and-hold"
-version = "0.3.6"
+version = "0.3.7"
 description = "Press & Hold Accents daemon for Wayland"
 authors = ["Vasak Group", "Joaquin (Pato) Decima"]
 edition = "2021"
