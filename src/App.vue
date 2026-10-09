@@ -60,14 +60,26 @@ onMounted(async () => {
 	// sistema, igual que en el resto de las aplicaciones. Va al final y sin
 	// bloquear: si la configuración no se puede leer, el selector tiene que
 	// aparecer igual, con los colores por defecto.
+	//
+	// Primero se suscribe y después se lee, cada cosa en su `try`: antes, un
+	// fallo en la primera lectura saltaba al `catch` y dejaba la suscripción sin
+	// registrar, así que los cambios de configuración de después nunca se
+	// aplicaban a este selector.
+	const configStore = useConfigStore() as any;
 	try {
-		const configStore = useConfigStore() as any;
-		await configStore.loadConfig();
 		unlisten.push(
 			await listen('config-changed', () => {
-				configStore.loadConfig();
+				void configStore.loadConfig().catch(() => {
+					// Un cambio que no se pudo leer no rompe nada: siguen los
+					// colores que ya estaban.
+				});
 			})
 		);
+	} catch (error) {
+		console.error('No se pudo escuchar los cambios de configuración', error);
+	}
+	try {
+		await configStore.loadConfig();
 	} catch (error) {
 		console.error('No se pudo leer la configuración de Vasak', error);
 	}
