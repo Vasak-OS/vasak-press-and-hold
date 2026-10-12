@@ -24,3 +24,24 @@ jobs:
     # instala dependencias de terceros.
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    with:
+      # Las pruebas de Rust corren en `revisar` y de esa misma corrida sale la
+      # cobertura que se le pasa a Sonar. Sin esto las pruebas no corrían en
+      # ningún PR, y un PR que sólo toca Rust pasaba la puerta sin medir nada
+      # (Vasak-OS/.github#25).
+      pruebas_rust: -p vasak-press-and-hold
+      # Lo que pide el grafo en Linux, mirado con `cargo tree -i`:
+      #
+      #   libwebkit2gtk-4.1-dev   webkit2gtk, gtk3 (que trae wayland-client),
+      #                           soup3 y `dbus-1`, que pide `libdbus-sys` por
+      #                           `tao`
+      #   libgtk-layer-shell-dev  `gtk-layer-shell-sys`, las superficies que
+      #                           se anclan al borde de la pantalla
+      #   lld                     `src-tauri/.cargo/config.toml` enlaza con
+      #                           `-fuse-ld=lld`, y la imagen del runner no lo trae
+      #   build-essential         el compilador de C de los `-sys`
+      paquetes_rust: >-
+        libwebkit2gtk-4.1-dev
+        libgtk-layer-shell-dev
+        lld
+        build-essential
