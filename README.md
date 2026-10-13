@@ -1,413 +1,370 @@
-# vasak-press-and-hold
+# Vasak press and hold
 
-Mantené apretada una vocal y aparece una tira con sus acentos: `a` ofrece
-`á à â ä ã å ā`, `n` ofrece `ñ ń`. Se elige con un número y la letra acentuada
-se escribe **en la aplicación donde estabas escribiendo**, no acá. Es el mismo
-gesto que tienen macOS y los teclados de los teléfonos, en VasakOS.
 
-No es una ventana que se abre ni una aplicación que se lanza: es un **demonio**
-que corre toda la sesión, lee el teclado antes que nadie y sólo dibuja algo
-cuando hace falta.
 
 ---
 
-## Índice
+## Tecnología
 
-- [El gesto](#el-gesto)
-- [Cómo funciona](#cómo-funciona)
-- [El camino de una tecla](#el-camino-de-una-tecla)
-- [Los permisos](#los-permisos) ← la parte que más cuesta cuando algo no anda
-- [El servicio](#el-servicio)
-- [Cuándo se hace a un lado](#cuándo-se-hace-a-un-lado)
-- [Suspender y despertar](#suspender-y-despertar)
-- [La ventana del selector](#la-ventana-del-selector)
-- [Estructura del repositorio](#estructura-del-repositorio)
-- [Compilar y probar](#compilar-y-probar)
-- [Diagnóstico](#diagnóstico)
-- [Lo que no hace](#lo-que-no-hace)
+[![Rust](https://img.shields.io/badge/Rust-1.82%2B-orange?style=flat&logo=rust)](https://www.rust-lang.org/) [![Tauri](https://img.shields.io/badge/Tauri-2.0-24283b?style=flat&logo=tauri)](https://tauri.app/) [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?style=flat&logo=vue.js)](https://vuejs.org/) [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178c6?style=flat&logo=typescript)](https://www.typescriptlang.org/)
+
+## Estado
+
+[![CI](https://github.com/Vasak-OS/vasak-press-and-hold/actions/workflows/ci.yml/badge.svg)](https://github.com/Vasak-OS/vasak-press-and-hold/actions/workflows/ci.yml)
+[![Versión](https://img.shields.io/github/v/release/Vasak-OS/vasak-press-and-hold?style=flat&label=Versi%C3%B3n)](https://github.com/Vasak-OS/vasak-press-and-hold/releases)
+[![Licencia](https://img.shields.io/github/license/Vasak-OS/vasak-press-and-hold?style=flat)](LICENSE)
+[![Cobertura](https://sonarcloud.io/api/project_badges/measure?project=Vasak-OS_vasak-press-and-hold&metric=coverage&style=flat)](https://sonarcloud.io/summary/new_code?id=Vasak-OS_vasak-press-and-hold)
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=Vasak-OS_vasak-press-and-hold&metric=alert_status&style=flat)](https://sonarcloud.io/summary/new_code?id=Vasak-OS_vasak-press-and-hold)
+[![Tamaño repo](https://img.shields.io/github/repo-size/Vasak-OS/vasak-press-and-hold?style=flat)](https://github.com/Vasak-OS/vasak-press-and-hold)
 
 ---
 
-## El gesto
+## Descripción
 
-Las teclas que tienen variantes son ocho: **a c e i o u n l**. Cualquier otra
-tecla del teclado pasa de largo sin que este programa haga nada con ella.
 
-1. Se mantiene apretada una de esas ocho durante **400 ms**
-   (`HOLD_THRESHOLD`). Menos que eso es una letra común y se escribe como
-   siempre.
-2. Aparece la tira de variantes, numeradas del 1 en adelante.
-3. Se elige:
 
-   | Tecla | Qué hace |
-   |---|---|
-   | `1`…`9` (fila de números o teclado numérico) | Escribe esa variante |
-   | `Intro` | Escribe la primera |
-   | `Esc` | Cierra sin escribir nada |
-   | Clic del ratón | Escribe la que se clickeó |
-   | Cualquier otra tecla | Cierra el selector y la tecla sigue su camino |
+**Para el usuario:** 
 
-La letra que se mantuvo **no** se escribe: lo que se escribe es la variante
-elegida. Y un número que nadie ofreció —el `8` con una `n`, que sólo tiene
-dos— no escribe un `8` en el texto: se descarta.
-
-### Por qué la letra no se escribe al apretarla
-
-Una tecla con variantes no se puede escribir en el momento en que baja, porque
-todavía no se sabe si es una letra o el comienzo de un mantenido. Tampoco puede
-esperar al *release*: escribiendo rápido se suelta la primera tecla después de
-apretar la segunda, así que «as» salía «sa». Era invisible en un editor de
-texto, donde se ve y se corrige, y brutal en un campo de contraseña, donde no
-se ve: la pantalla de bloqueo rechazaba la contraseña correcta.
-
-Lo que hace hoy es esperar al **siguiente evento de teclado**, sea cual sea:
-cualquier cosa que pase resuelve primero la tecla pendiente, en el orden en que
-se apretó. Un mantenido es, por definición, una tecla sin nada después, así que
-el selector sigue funcionando igual.
+**Integración VasakOS:** Integra con el ecosistema VasakOS vía D-Bus y configuración compartida.
 
 ---
 
-## Cómo funciona
+## Arquitectura (diagramas)
 
-No hay una API de escritorio que permita esto en Wayland, así que el programa
-se mete un escalón más abajo: **lee los dispositivos de entrada del kernel**.
+> Copia y pega la plantilla que necesites, descomenta y adapta.
 
-```
-/dev/input/event*   ──grab exclusivo──▶  vasak-press-and-hold  ──▶  /dev/uinput
- (teclados reales)                          (decide)                (teclado virtual)
-                                                │                         │
-                                                │                         ▼
-                                                │                    el compositor
-                                                │                    ve ESTE teclado
-                                                ▼
-                                        ventana layer-shell        teclado virtual
-                                        (la tira de acentos)        de Wayland
-                                                                  (escribe é, ā, ø…)
-```
-
-Las piezas, en orden:
-
-**Enumerar los teclados** (`src-tauri/src/input.rs`). Se recorre `/dev/input`,
-se abre cada `event*` y se queda con los que declaran tener una tecla `A`. El
-teclado virtual propio se descarta por nombre: declara **todos** los códigos de
-tecla, así que pasaría el filtro, y tomarlo sería realimentar el bucle consigo
-mismo y dejar la máquina sin teclado.
-
-**Tomarlos en exclusiva** (`EVIOCGRAB`). El compositor deja de ver el teclado
-físico. Es imprescindible: si un dispositivo siguiera entregando por su cuenta
-mientras acá se replica todo, cada tecla llegaría dos veces. Un teclado que no
-se puede tomar se descarta de la lista antes que usarse a medias.
-
-**Devolver lo que se lee** (`src-tauri/src/uinput.rs`). Todo lo que entra sale
-por un teclado virtual de `uinput`, que es el único que el compositor ve. Esto
-convierte al demonio en punto único de falla de **todo** el teclado, atajos del
-compositor incluidos, y de ahí sale casi todo el cuidado que tiene el resto del
-programa: si se pierden tres teclas seguidas al replicarlas, suelta los
-teclados y se sale para que systemd lo levante de nuevo — un teclado sin
-acentos es mucho mejor que un teclado muerto. Ese teclado virtual además
-declara las luces (Bloq Mayús y compañía) y copia a los teclados reales lo que
-el compositor enciende en él, o el indicador de mayúsculas no se prendería
-nunca.
-
-**Escribir el acento** (`src-tauri/src/char_input.rs`). Acá hay un segundo
-teclado virtual, y de otra clase. El de `uinput` manda *códigos de tecla*, que
-el compositor interpreta con **tu** distribución: así sólo se puede escribir lo
-que tu teclado ya tiene —la `ñ` en latinoamericano— y nada más; la `é` no es
-una tecla en ningún lado, se escribe con acento muerto. Entonces, en vez de
-buscar el carácter en el mapa ajeno, se trae uno propio: el protocolo
-`zwp_virtual_keyboard_v1` de Wayland permite entregarle al compositor un mapa
-de teclado con exactamente una tecla por carácter que el selector puede
-ofrecer. Es lo mismo que hace `wtype`. Si no se puede crear, queda de reserva
-la distribución del sistema, que sirve para poco.
-
-**El mapa de acentos** (`src-tauri/src/accent_map.rs`). Los códigos del kernel
-son **posicionales**: el 30 es la tecla donde una distribución US tiene la `a`.
-Las listas nunca pasan de nueve variantes, porque se eligen por número.
-
-**La ventana** (`src-tauri/src/picker_window.rs` y `src/App.vue`). Una
-superficie de capa (`gtk-layer-shell`) en la capa *overlay*, anclada abajo,
-**sin interactividad de teclado**. Que no tome el teclado es deliberado: si lo
-tomara, el acento elegido se escribiría dentro del selector en vez de en la
-aplicación donde estabas escribiendo. Por eso los números los atiende el
-demonio, que ya tiene el teclado tomado.
-
----
-
-## El camino de una tecla
+### Flujo de datos
 
 ```mermaid
-flowchart TD
-    K["Tecla en /dev/input/event*"] --> G{"¿Hay un juego adelante?"}
-    G -- "sí" --> F["Se reenvía tal cual"]
-    G -- "no" --> T{"¿Es a c e i o u n l?"}
-    T -- "no" --> F
-    T -- "sí, baja" --> W["Se calienta la ventana<br/>y queda pendiente"]
-    W --> N{"¿Qué pasa después?"}
-    N -- "otra tecla" --> L["Se escribe la letra<br/>y sigue la otra"]
-    N -- "se suelta" --> L
-    N -- "nada, 400 ms" --> P["Se abre el selector"]
-    P --> S{"¿Con qué se elige?"}
-    S -- "1..9 / Intro / clic" --> A["Se escribe la variante<br/>por el teclado de caracteres"]
-    S -- "Esc / otra tecla" --> C["Se cierra sin escribir"]
-    F --> U["/dev/uinput"]
-    L --> U
-    A --> U
+<!--
+graph TD
+    A[Entrada: Teclado / Ratón / D-Bus / Sistema] --> B[Procesamiento: Core Rust + Tauri Commands]
+    B --> C[Salida: UI actualizada / Acciones del sistema]
+    style A fill:#e1f5fe
+    style C fill:#e8f5e9
+-->
 ```
 
-La decisión de qué hacer con cada evento vive en una función pura,
-`decide()`, separada de la escritura a propósito: el orden de las letras —lo
-único que este módulo rompe cuando rompe algo— se puede probar sin un teclado
-virtual y sin un compositor.
+### Componentes internos
+
+```mermaid
+<!--
+flowchart LR
+    subgraph App[Vasak press and hold]
+        UI[Frontend Vue 3 + vue-libvasak]
+        Core[Core Rust: lógica principal]
+        IPC[Tauri Commands / Eventos]
+        System[Systemd / D-Bus / PipeWire / Wayland]
+    end
+    UI --> IPC
+    IPC --> Core
+    Core --> DBus[(D-Bus / zbus)]
+    Core --> System
+    style UI fill:#f3e5f5
+    style Core fill:#e3f2fd
+    style DBus fill:#fff3e0
+    style System fill:#fce4ec
+-->
+```
+
+### Integración en el sistema VasakOS
+
+```mermaid
+<!--
+C4Context
+    title Vasak press and hold en VasakOS
+    Person(usuario, "Usuario", "Persona que usa el sistema")
+    System_Boundary(c1, "VasakOS") {
+        System(app, "Vasak press and hold", "")
+        System_Ext(settings, "vasak-settings", "Configuración central")
+        System_Ext(keyring, "vasak-keyring", "Secrets y claves")
+        System_Ext(accounts, "vasak-accounts", "Cuentas e identidad")
+        System_Ext(permissions, "vasak-permissions", "Permisos y portales")
+    }
+    System_Ext(systemd, "systemd", "Gestión de servicios")
+    System_Ext(dbus, "D-Bus", "Bus de mensajes del sistema")
+    System_Ext(wayland, "Wayland / Wayfire", "Compositor")
+    System_Ext(pipewire, "PipeWire", "Multimedia")
+    Rel(usuario, app, "Usa")
+    Rel(app, settings, "Lee/escribe config")
+    Rel(app, keyring, "Guarda/lee secrets")
+    Rel(app, accounts, "Identidad de cuenta")
+    Rel(app, permissions, "Solicita permisos")
+    Rel(app, systemd, "Activación / sockets")
+    Rel(app, dbus, "Expone / consume interfaces")
+    Rel(app, wayland, "Superficies / protocolos")
+    Rel(app, pipewire, "Streams de audio/video")
+-->
+```
 
 ---
 
-## Los permisos
+## Instalación
 
-Leer el teclado y escribir por `uinput` necesita acceso a dispositivos que por
-omisión son de `root`. Se resuelve con `60-vasak-press-and-hold.rules`, que el
-paquete instala en `/usr/lib/udev/rules.d/`, y hay dos cosas ahí que no son
-evidentes y que costaron caro.
-
-```
-KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput", TAG+="uaccess"
-KERNEL=="event*", MODE="0660", TAG+="uaccess"
-```
-
-### El número del archivo importa
-
-La etiqueta `uaccess` es la que le da acceso **a la sesión activa** en vez de
-sumar a alguien al grupo `input` —que se lo daría a todas las sesiones, a la
-vez y para siempre—. Pero esa etiqueta la consume systemd en
-`73-seat-late.rules`, y udev aplica los archivos en el orden léxico de sus
-nombres: una regla numerada 99 pone la etiqueta mucho después de que el
-builtin que la lee ya corrió. La etiqueta queda puesta y **nadie la mira**.
-
-Con la regla en 99, `/dev/uinput` quedaba `root:input 0660` sin ACL para quien
-estaba frente al teclado: el grupo y el modo sí se habían aplicado, la etiqueta
-no. Todo lo que en el sistema usa `uaccess` está numerado por debajo de 73 por
-esta razón.
-
-### `static_node` es lo que hace que la regla llegue
-
-`uinput` está en el `modules.devname` del kernel, así que systemd crea el nodo
-al arrancar —`root:root 0600`— **antes** de que el módulo se cargue. Hasta que
-algo lo abra no hay dispositivo y por lo tanto no hay uevent: una regla
-`KERNEL=="uinput"` a secas no corre nunca y los permisos quedan como estaban.
-Y `uaccess` tampoco puede ayudar, porque una ACL necesita un dispositivo donde
-colgarse y un nodo estático no tiene ninguno.
-
-`static_node=uinput` es lo que permite fijarle grupo y modo a ese nodo que
-todavía no es un dispositivo. De ahí que el paquete instale además
-`/usr/lib/modules-load.d/vasak-press-and-hold.conf`, con una sola línea:
-
-```
-uinput
-```
-
-Cargar el módulo hace que aparezca el dispositivo de verdad, y recién ahí la
-etiqueta le entrega la ACL a la sesión activa.
-
-Sin esas dos cosas el síntoma es el mismo y no dice nada:
-
-```
-Cannot open /dev/uinput: permission denied
-```
-
-Después de tocar las reglas a mano:
+### Arch Linux (repo oficial)
 
 ```bash
-sudo udevadm control --reload-rules && sudo udevadm trigger
+pacman -S vasak-vasak-press-and-hold
 ```
 
----
-
-## El servicio
-
-`packaging/vasak-press-and-hold.service` es una unidad **de usuario**, atada a
-`graphical-session.target`.
-
-Este proceso lee el teclado entero, tecla por tecla, antes que nadie. Eso es
-exactamente lo que hace un keylogger, así que la unidad viene bastante cerrada:
-
-- **`RestrictAddressFamilies=AF_UNIX`.** Sin red. Acá no es un detalle: lo que
-  lee no tiene por dónde irse.
-- **`PrivateDevices=yes` más tres `BindPaths`**: el teclado, `uinput` y la
-  placa de video. Ni la cámara, ni el micrófono, ni los discos. Se hace con
-  montajes y no con `DevicePolicy=closed`, que sería lo esperable: comprobado a
-  mano, en una unidad de usuario ese filtro **no se aplica** —depende de un
-  programa BPF que el gestor sin privilegios no puede cargar— y habría quedado
-  de adorno.
-- `NoNewPrivileges`, `CapabilityBoundingSet=` vacío, `ProtectProc=invisible`,
-  `SystemCallFilter=@system-service` y el resto de lo habitual.
-
-`MemoryDenyWriteExecute` y `RestrictNamespaces` quedan afuera a propósito: el
-selector es una ventana Tauri, y WebKit compila su JavaScript en memoria y usa
-espacios de nombres para su propio aislamiento.
+### Debian / Ubuntu (.deb)
 
 ```bash
-systemctl --user status vasak-press-and-hold
-systemctl --user restart vasak-press-and-hold
-journalctl --user -u vasak-press-and-hold -f
+wget https://github.com/Vasak-OS/vasak-press-and-hold/releases/download/v{{VERSION}}/vasak-vasak-press-and-hold_{{VERSION}}_amd64.deb
+sudo apt install ./vasak-vasak-press-and-hold_{{VERSION}}_amd64.deb
 ```
 
-El demonio **sale con error** cuando no encuentra teclados o no logra crear el
-teclado virtual, en vez de quedarse corriendo sin hacer nada: un proceso vivo
-que no funciona le dice a `systemctl status` que todo está bien, y así esto
-pasó desapercibido más de una vez.
-
----
-
-## Cuándo se hace a un lado
-
-Las ocho teclas que abren el selector son, en un videojuego, **A** de moverse a
-la izquierda, **C** de agacharse y **E** de interactuar. Y como el demonio toma
-el teclado en exclusiva y una tecla objetivo no se reenvía al bajar, mientras
-se mantiene una el juego **no recibe nada**. O sea que no alcanzaba con no
-dibujar la ventana.
-
-`src-tauri/src/no_molestar.rs` resuelve eso: con un juego adelante, **ninguna**
-tecla es objetivo y se reenvían todas tal cual, sin esperar y sin tragar.
-
-Cuenta como juego la pantalla completa —que cubre la mayoría— más una lista
-corta de programas que corren en ventana sin bordes: `gamescope`, `steam`,
-`lutris`, `heroic`, `bottles`, y la familia `steam_app_*`.
-
-Quién está adelante se lo pregunta a Wayfire por su IPC
-(`window-rules/get-focused-view`), pero **no por cada tecla**: son cientos por
-segundo y cada consulta es una ida y vuelta por un socket. Un hilo escucha
-`window-rules/events/watch`, reconsulta cuando algo cambia y deja un booleano;
-leerlo por tecla es un `load` atómico. Hay tests de cableado
-(`src-tauri/tests/cableado.rs`) que fallan si alguien saca esa consulta del
-cálculo de `is_target` o la mete de vuelta en el camino de cada tecla.
-
----
-
-## Suspender y despertar
-
-Los dispositivos se enumeran al arrancar. Si al reanudar el descriptor viejo
-dejó de servir, el demonio se queda con un grab que no lee nada y no hay forma
-de recuperar el teclado sin apagar la máquina a la fuerza. No es hipotético:
-pasó.
-
-`src-tauri/src/energia.rs` escucha `PrepareForSleep` de logind por el bus de
-sistema, que llega dos veces por ciclo:
-
-- **Antes de dormir** se sueltan los grabs. Nadie escribe mientras la máquina
-  duerme, y si el demonio no sobreviviera al ciclo el teclado queda usable.
-- **Al despertar** se vuelven a enumerar los teclados desde cero y se toman de
-  nuevo. Enumerar y no reusar es a propósito: si el dispositivo se fue y volvió
-  es otro nodo.
-
-Si no hay bus de sistema, se avisa por el registro y el demonio sigue andando
-igual: se pierde la recuperación automática, no el teclado.
-
----
-
-## La ventana del selector
-
-La ventana estaba declarada en `tauri.conf.json` y existía desde el arranque,
-con el WebKit completo residente toda la sesión: **~329 MB** medidos en una
-sesión real, para dibujar una fila de botones que aparece un par de segundos
-por día.
-
-Hoy se crea cuando hace falta, y como esto es un método de entrada —donde la
-latencia sí importa— la creación diferida se apoya en dos cosas:
-
-1. **Se calienta en el `keydown`, no al abrir.** El selector abre recién a los
-   400 ms de tener la tecla apretada, así que empezar a construir cuando la
-   tecla *baja* esconde el costo detrás de un gesto que la persona ya está
-   haciendo.
-2. **El estado se pide, no se emite.** Entre crear el webview y que Vue monte
-   pasan cientos de milisegundos, y un `emit` en ese hueco se pierde. El
-   backend anota qué variantes hay que mostrar y el frontend las reclama al
-   montar con el comando `picker_ready`. Si la ventana llega tarde, el selector
-   aparece tarde — nunca vacío.
-
-El desarme es perezoso a propósito: **diez minutos** sin acentos, porque quien
-usó uno va a usar otro y pagar la creación en cada palabra sería peor que el
-problema que esto resuelve.
-
----
-
-## Estructura del repositorio
-
-```
-vasak-press-and-hold/
-├── 60-vasak-press-and-hold.rules      # los permisos de udev
-├── packaging/
-│   ├── vasak-press-and-hold.service           # unidad de usuario, endurecida
-│   └── vasak-press-and-hold.modules-load.conf # carga uinput al arrancar
-├── src/                               # el frontend: sólo dibuja la tira
-│   └── App.vue
-├── src-tauri/
-│   ├── src/
-│   │   ├── lib.rs           # arranque, estado compartido, comandos Tauri
-│   │   ├── input.rs         # enumerar, tomar, decidir y replicar
-│   │   ├── uinput.rs        # el teclado virtual del kernel
-│   │   ├── char_input.rs    # el teclado virtual de Wayland (escribe é, ā, ø…)
-│   │   ├── accent_map.rs    # qué variantes tiene cada letra
-│   │   ├── picker_window.rs # crear y desarmar la ventana
-│   │   ├── energia.rs       # suspender y despertar
-│   │   └── no_molestar.rs   # apartarse cuando hay un juego adelante
-│   └── tests/cableado.rs    # que la compuerta del «no molestar» siga enchufada
-└── tests/                   # los guardias del frontend
-```
-
----
-
-## Compilar y probar
+### Desde fuente
 
 ```bash
-bun install
+git clone https://github.com/Vasak-OS/vasak-press-and-hold.git
+cd vasak-press-and-hold
+
+# Desarrollo (recarga en caliente frontend + backend)
+bun run dev
+
+# Build producción
+bun run build
+
+# Solo frontend
+bun run build:frontend
+
+# Solo backend Rust
+cargo build --release --locked
+```
+
+### Flatpak / AppImage
+
+> *Placeholder: añadir cuando exista paquete Flatpak o AppImage oficial.*
+
+---
+
+## Uso rápido
+
+```bash
+# Se lanza automáticamente (systemd --user) o manualmente:
+vasak-press-and-hold
+```
+
+### Atajos / flags principales
+
+| Acción | Comando / Tecla |
+|--------|-----------------|
+| Acción principal | `vasak-press-and-hold` |
+| Configuración | `vasak-press-and-hold --config` |
+| Ayuda | `vasak-press-and-hold --help` |
+
+> **Captura:** `assets/demo.gif` *(placeholder — sustituir por GIF real)*
+
+---
+
+## Configuración
+
+### Archivo de configuración
+
+```
+~/.config/vasak/vasak-press-and-hold.toml
+```
+
+### Variables de entorno
+
+| Variable | Descripción | Por defecto |
+|----------|-------------|-------------|
+| `VASAK_DEBUG` | Activa logs de depuración en consola | `false` |
+| `VASAK_PROFILE` | Perfil de rendimiento: `balanced`, `performance`, `power-save` | `balanced` |
+
+### Integración con `tauri-plugin-config-manager`
+
+- Esquemas de color: respeta `--ui-primary`, `--ui-surface`, `--ui-focus`, `--ui-on-surface`, `--ui-border`
+- Tema de iconos: usa el tema del sistema (`vasakos-icon-theme`) vía `vicon` lookup
+- Radio de bordes: variable CSS `--ui-radius` del esquema activo (por defecto 12px)
+- Fuentes: `--ui-font-family`, `--ui-font-size-base` desde el esquema
+
+---
+
+## Desarrollo
+
+### Requisitos
+
+- **Rust:** `rustup` toolchain estable (`rust-toolchain.toml` fija la versión)
+- **Node / bun:** `bun` ≥ 1.1 (nunca npm/yarn/pnpm para apps Tauri)
+- **Sistema:** `pkg-config`, `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, `libssl-dev`
+- *`libgtk-layer-shell-dev`, `wayland-protocols`, `wayfire-dev` para Wayland*
+
+### Dependencias de desarrollo
+
+#### Sistema (paquetes Arch / Debian / Fedora)
+
+`base-devel`, `pkgconf`, `libssl-dev`, `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `gstreamer1.0-plugins-base`, `gstreamer1.0-plugins-good`, `libpipewire-0.3-dev`, `libwireplumber-0.5-dev`, `libdbus-1-dev`, `libudev-dev`, `libxkbcommon-dev`, `libwayland-dev`, `meson`, `ninja`, `clang`, `lld`
+
+#### Rust
+
+`rustup` → `stable` + `rustfmt` + `clippy`
+
+#### Node
+
+**Solo `bun`** (nunca npm/yarn/pnpm para apps Tauri). `bun --version` ≥ 1.1
+
+#### Herramientas CLI
+
+`just` (command runner), `cargo-binstall` (opcional), `cargo-llvm-cov` (para cobertura)
+
+### Correr la app en desarrollo
+
+```bash
+# Frontend (Vite dev server + Tauri dev)
+bun run tauri dev
+
+# Solo frontend (Vite)
+bun run dev
+
+# Solo backend (cargo watch)
+cargo watch -x "run --bin vasak-press-and-hold"
+```
+
+### Compilar / Build de release
+
+```bash
+# Build completo (frontend + backend + bundle)
 bun run tauri build
+
+# Solo frontend (para testear bundle después)
+bun run build
+
+# Solo backend Rust (binario optimizado)
+cargo build --release --locked
+
+# Paquetes nativos
+# Arch: makepkg -sf en PKGBUILDS/vasak-press-and-hold/
+# Debian: cargo deb --no-build --target-dir src-tauri/target/release/debian
 ```
 
-Para probarlo en la sesión hay que compilar con `--features custom-protocol`,
-o el WebView del selector abre vacío.
+### Targets principales
 
 ```bash
-bun test                    # el frontend
-cd src-tauri && cargo test  # el demonio
-bun run lint                # biome
+# Desarrollo (Tauri dev server + hot reload)
+bun run dev
+
+# Build producción
+bun run build
+
+# Solo frontend
+bun run build:frontend
+
+# Solo backend Rust
+cargo build --release --locked
+
+# Lint + tipos (pre-commit / CI)
+bunx --bun biome check .
+bunx vue-tsc --noEmit
+cargo fmt --check
 ```
 
-La lógica de `decide()`, el mapa de acentos, la traducción de `PrepareForSleep`
-y la detección de juegos tienen tests que no necesitan teclado ni compositor.
-Lo que ninguno de ellos ve es el **cable** entre las piezas, y para eso está
-`src-tauri/tests/cableado.rs`, que lee el código fuente y falla si la compuerta
-se desconecta.
+### Pruebas
+
+```bash
+# Suite completa JS (Vitest via bun:test)
+bun test
+
+# Suite completa Rust (crates en pruebas_rust del CI)
+cargo test -p vasak-press-and-hold-core -p vasak-press-and-hold-ui --locked
+
+# Integración (requiere Wayfire corriendo)
+cargo test -p vasak-press-and-hold-integration --locked -- --ignored
+```
+
+### Convención de commits
+
+[Conventional Commits](https://www.conventionalcommits.org/es/v1.0.0/):
+
+```
+<tipo>(<ámbito>): <descripción corta>
+
+[cuerpo opcional]
+
+[pie opcional: Closes #N]
+```
+
+Tipos habituales: `feat`, `fix`, `bugfix`, `docs`, `ci`, `chore`, `security`, `refactor`, `perf`, `test`.
+
+### Cómo abrir PR
+
+1. Rama desde `origin/main`:
+   ```bash
+   git worktree add -b feat/tema ~/wt/vasak-press-and-hold-tema origin/main
+   ```
+2. Prefijos de rama: `fix/`, `feat/`, `bugfix/`, `docs/`, `ci/`, `chore/`, `security/`
+3. Escribe el fix → **`qa` escribe las pruebas** (fallan sin el fix) → suite verde → abre PR
+4. Al abrir PR, **cuatro cosas obligatorias**:
+   - Asignado a `JoaquinDecima`
+   - Etiqueta `enhancement` o `bug` (+ `ci` / `dependencies` si aplica)
+   - Añadido al proyecto «VasakOS Roadmap»
+   - Status **In Progress**
 
 ---
 
-## Diagnóstico
+## Arquitectura (texto)
 
-| Variable | Qué hace |
-|---|---|
-| `VASAK_PAH_DEBUG=1` | Traza lo que decide el demonio con cada tecla |
-| `VASAK_PICKER_TRACE=1` | Traza la creación y el desarme de la ventana |
-| `VASAK_PICKER_IDLE_SECS=N` | Acorta los diez minutos del desarme, para poder probarlo |
+### Crates / módulos principales
 
-Síntomas y dónde mirar:
+| `vasak-press-and-hold-core` | Lógica compartida: estado, D-Bus, IPC |
+| `vasak-press-and-hold-ui` | Frontend Vue 3 + componentes vue-libvasak |
+| `vasak-press-and-hold-tauri` | Puente Tauri: commands, eventos, WebView |
 
-| Lo que se ve | Dónde está el problema |
-|---|---|
-| `Cannot open /dev/uinput` | Las reglas de udev: ver [Los permisos](#los-permisos) |
-| `No keyboard devices found` | `ls -la /dev/input/event*`, la segunda regla |
-| El teclado escribe pero no hay acentos | El teclado de caracteres de Wayland; mirar el registro |
-| Cada letra sale duplicada | Un teclado que no se pudo tomar en exclusiva |
-| El selector no aparece dentro de un juego | Es a propósito: ver [Cuándo se hace a un lado](#cuándo-se-hace-a-un-lado) |
+### Interfaces D-Bus / zbus expuestas
+
+| `org.vasak.Vasak-press-and-hold` | `GetState()`, `StateChanged(dict)`, `SetConfig(dict)` | Estado y control principal |
+| `org.vasak.Vasak-press-and-hold.Panel` | `SetPosition(string)`, `SetAutohide(bool)`, `Height(u32)` | Configuración panel en runtime |
+
+### Puntos de extensión
+
+- **Plugins:** Sistema de plugins modular
+- **Hooks:** Hooks de ciclo de vida
+- **API pública Rust:** API pública del crate principal
+
+### Features / Cargo features
+
+| Feature | Descripción | Default |
+|---------|-------------|---------|
+| `system-tray` | Bandeja del sistema + menú contextual | ✓ |
+| `notifications` | Integración libnotify / freedesktop | ✓ |
+| `updater` | Auto-actualización (tauri-plugin-updater) | |
+| `devtools` | DevTools en release (solo debug) | |
+| `experimental-wayland` | Protocolo Wayland inestable | |
+
+Y para apps Tauri+Vue: features del `tauri.conf.json` → `bundle` / `plugins` / `allowlist` (capabilities).
 
 ---
 
-## Lo que no hace
+## Pruebas y calidad
 
-- **No es un método de entrada de Wayland**, que es lo que el diseño original
-  pedía. Lee el teclado crudo, y de ahí sale todo lo demás de esta lista.
-- **No sabe si hay un campo de texto con el foco.** Un juego en ventana común
-  —ni a pantalla completa ni en la lista de nombres— sigue viendo aparecer el
-  selector; la salida es soltar la tecla.
-- **Sólo ocho letras.** El mapa es fijo y está en `accent_map.rs`.
-- **Nueve variantes como máximo** por letra, porque se eligen por número.
-- **Depende de Wayfire** para saber quién está adelante. En otro compositor el
-  «no molestar» no se entera de nada y el selector aparece siempre.
-```
+- **Cobertura objetivo:** ≥ 80 % del código nuevo (SonarCloud Quality Gate)
+- **Informes:** GitHub Actions → pestaña *SonarCloud Code Analysis* → enlace a SonarCloud
+- **Añadir pruebas:** ver `AGENTS.md` sección 9 (mapa de repos y comandos de prueba)
+- **Regla:** toda corrección lleva prueba escrita por `qa` que falla sin el fix
+
+---
+
+## Contribuir
+
+- **Guía:** [.github/CONTRIBUTING.md](https://github.com/Vasak-OS/.github/blob/main/CONTRIBUTING.md)
+- **Plantillas de issue:** [.github/ISSUE_TEMPLATE/](https://github.com/Vasak-OS/.github/tree/main/ISSUE_TEMPLATE)
+- **Código de conducta:** [CODE_OF_CONDUCT.md](https://github.com/Vasak-OS/.github/blob/main/CODE_OF_CONDUCT.md)
+
+---
+
+## Donadores / Sponsors
+
+[![Sponsors](https://img.shields.io/github/sponsors/Vasak-OS?style=flat&label=Sponsors)](https://github.com/sponsors/Vasak-OS)
+
+> **Backers:** *Actualizado automáticamente en CI desde GitHub Sponsors / OpenCollective / Polar.*
+
+[💖 Donar al proyecto](https://github.com/sponsors/Vasak-OS)
+
+---
+
+## Licencia
+
+`GPL-3.0` — Copyright © 2026 **Vasak-OS Contributors**
+
+[Ver licencia completa](LICENSE)
