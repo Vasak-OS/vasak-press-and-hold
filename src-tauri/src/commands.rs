@@ -159,6 +159,20 @@ fn tune_webkit(window: &tauri::WebviewWindow) {
         // No navega páginas: con el caché mínimo alcanza.
         context.set_cache_model(CacheModel::DocumentViewer);
     }
+
+    // El webview es residente toda la sesión y ya no se recrea: si su
+    // `WebKitWebProcess` muere (un crash del renderer, el OOM killer), sin esto
+    // quedaría con una página muerta y `READY` en `true` para siempre —`deliver`
+    // emitiría a la nada y `show_picker` mapearía un overlay vacío—, roto hasta
+    // reiniciar el servicio. Antes el desarme por inactividad lo recreaba; ahora
+    // lo recupera recargándolo, que respawnea el proceso y remonta el frontend
+    // (que vuelve a pedir con `picker_ready`). `mark_not_ready` deja lo que
+    // llegue en `PENDIENTE` mientras tanto.
+    webview.connect_web_process_terminated(|webview, reason| {
+        eprintln!("[press-and-hold/picker] el WebKitWebProcess terminó ({reason:?}); recargando");
+        crate::picker_window::mark_not_ready();
+        webview.reload();
+    });
 }
 
 /// Crea el selector la primera vez que hace falta (y una sola): construye el

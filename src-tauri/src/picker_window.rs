@@ -87,3 +87,27 @@ pub fn take_pending() -> Option<AccentPayload> {
     READY.store(true, Ordering::SeqCst);
     pendiente.take()
 }
+
+/// El selector dejó de estar listo: su `WebKitWebProcess` murió y su webview se
+/// recarga. Sin esto `READY` quedaría en `true` para siempre y `deliver`
+/// seguiría emitiendo a una página que ya no existe; al volver a `false`, lo que
+/// llegue se guarda en `PENDIENTE` hasta que el frontend remonte y vuelva a
+/// pedir con `picker_ready`. Lo llama el glue de GTK en `commands.rs`.
+pub(crate) fn mark_not_ready() {
+    READY.store(false, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mark_not_ready_vuelve_a_no_listo() {
+        READY.store(true, Ordering::SeqCst);
+        mark_not_ready();
+        assert!(
+            !READY.load(Ordering::SeqCst),
+            "tras morir el web process, el selector tiene que quedar no listo"
+        );
+    }
+}
