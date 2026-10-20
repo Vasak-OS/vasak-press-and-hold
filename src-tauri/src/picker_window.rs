@@ -32,13 +32,6 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::commands::ensure_created;
 use crate::input::AccentPayload;
 
-/// Traza sólo cuando se pide.
-pub(crate) fn traza(mensaje: &str) {
-    if std::env::var_os("VASAK_PICKER_TRACE").is_some() {
-        eprintln!("[press-and-hold/picker] {mensaje}");
-    }
-}
-
 /// Medidas del selector, compartidas con `input.rs`.
 ///
 /// Estaban sólo allá, y acá se mostraba la ventana con el tamaño del

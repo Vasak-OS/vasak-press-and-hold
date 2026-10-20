@@ -14,7 +14,14 @@ use gtk_layer_shell::LayerShell;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::input::{self, AccentPayload};
-use crate::picker_window::{tamano_para, traza, CREATING, PENDIENTE};
+use crate::picker_window::{tamano_para, CREATING, PENDIENTE};
+
+/// Traza sólo cuando se pide.
+fn traza(mensaje: &str) {
+    if std::env::var_os("VASAK_PICKER_TRACE").is_some() {
+        eprintln!("[press-and-hold/picker] {mensaje}");
+    }
+}
 use crate::AppState;
 
 /// Alto y ancho de arranque de la ventana. Los mismos valores que declaraba

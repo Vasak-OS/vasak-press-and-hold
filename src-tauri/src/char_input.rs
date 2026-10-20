@@ -15,8 +15,8 @@
 //! the only way that does not depend on which keyboard is plugged in.
 
 use std::collections::HashMap;
-use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 use std::io::{Seek, Write};
+use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
 use wayland_client::protocol::{wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
@@ -211,7 +211,11 @@ macro_rules! sin_eventos {
 }
 
 // Ninguno de estos nos manda nada que nos importe: sólo escribimos.
-sin_eventos!(wl_seat::WlSeat, ZwpVirtualKeyboardManagerV1, ZwpVirtualKeyboardV1);
+sin_eventos!(
+    wl_seat::WlSeat,
+    ZwpVirtualKeyboardManagerV1,
+    ZwpVirtualKeyboardV1
+);
 
 #[cfg(test)]
 mod tests {
@@ -242,7 +246,10 @@ mod tests {
                 bytes.len(),
             )
         };
-        assert_eq!(leidos, size as isize, "el descriptor no tiene los bytes anunciados");
+        assert_eq!(
+            leidos, size as isize,
+            "el descriptor no tiene los bytes anunciados"
+        );
         assert_eq!(bytes[bytes.len() - 1], 0, "el mapa no termina en cero");
 
         // Y compila leído así, que es como lo lee el compositor.
