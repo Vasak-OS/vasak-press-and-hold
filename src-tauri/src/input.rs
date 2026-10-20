@@ -782,9 +782,9 @@ fn hide_picker(app: &AppHandle) {
         let _ = win.hide();
     }
     let _ = app.emit("hide-accent-menu", ());
-    // Se cerró: si no se usa ningún acento por un rato largo, el webview entero
-    // se desarma y el demonio vuelve a costar lo que cuesta un demonio.
-    crate::picker_window::schedule_teardown(app);
+    // Se esconde, no se destruye: el webview queda residente y se reusa en la
+    // próxima apertura. Destruirlo dejaba vivo el WebKitWebProcess —decenas
+    // colgados por sesión— y recrearlo cada vez costaba la ventana de carga.
 }
 
 #[cfg(test)]
