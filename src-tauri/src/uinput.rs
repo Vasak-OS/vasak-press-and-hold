@@ -76,7 +76,10 @@ pub struct VirtualKeyboard {
 impl VirtualKeyboard {
     pub fn new() -> Result<Self, String> {
         unsafe {
-            let fd = libc::open(c"/dev/uinput".as_ptr(), libc::O_RDWR | libc::O_NONBLOCK);
+            let fd = libc::open(
+                c"/dev/uinput".as_ptr(),
+                libc::O_RDWR | libc::O_NONBLOCK,
+            );
             if fd < 0 {
                 let err = std::io::Error::last_os_error();
                 return Err(format!(
@@ -174,14 +177,10 @@ impl VirtualKeyboard {
             value: 0,
         };
         unsafe {
-            let ev_bytes = std::slice::from_raw_parts(
-                &event as *const InputEvent as *const u8,
-                std::mem::size_of::<InputEvent>(),
-            );
-            let syn_bytes = std::slice::from_raw_parts(
-                &syn as *const InputEvent as *const u8,
-                std::mem::size_of::<InputEvent>(),
-            );
+            let ev_bytes =
+                std::slice::from_raw_parts(&event as *const InputEvent as *const u8, std::mem::size_of::<InputEvent>());
+            let syn_bytes =
+                std::slice::from_raw_parts(&syn as *const InputEvent as *const u8, std::mem::size_of::<InputEvent>());
 
             if libc::write(self.fd, ev_bytes.as_ptr() as *const _, ev_bytes.len()) < 0 {
                 return Err("Failed to write input event".into());
@@ -210,11 +209,7 @@ impl VirtualKeyboard {
 
         loop {
             let leidos = unsafe {
-                libc::read(
-                    self.fd,
-                    buffer.as_mut_ptr() as *mut libc::c_void,
-                    buffer.len(),
-                )
+                libc::read(self.fd, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len())
             };
 
             if leidos <= 0 {
@@ -268,9 +263,16 @@ fn find_keycode_for_keysym(keysym: u32) -> Result<u16, String> {
     use xkbcommon::xkb;
 
     let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
-    let keymap =
-        xkb::Keymap::new_from_names(&context, "", "", "", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
-            .ok_or("Failed to create keymap")?;
+    let keymap = xkb::Keymap::new_from_names(
+        &context,
+        "",
+        "",
+        "",
+        "",
+        None,
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+    .ok_or("Failed to create keymap")?;
     let state = xkb::State::new(&keymap);
 
     for evdev_code in 0u16..256 {
