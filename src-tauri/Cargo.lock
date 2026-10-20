@@ -4526,7 +4526,7 @@ dependencies = [
 
 [[package]]
 name = "vasak-press-and-hold"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64 0.22.1",
  "evdev",
@@ -4541,6 +4541,7 @@ dependencies = [
  "tauri-plugin-shell",
  "wayland-client",
  "wayland-protocols-misc",
+ "webkit2gtk",
  "xkbcommon",
  "zbus",
 ]
