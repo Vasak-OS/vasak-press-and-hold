@@ -8,6 +8,9 @@ use tauri::{AppHandle, Emitter};
 
 use crate::accent_map::{char_to_xkb_keysym, get_variants, key_to_base_char};
 use crate::char_input::CharKeyboard;
+// Mostrar el selector es glue de GTK: vive en `commands` (fuera de cobertura),
+// no acá. Se importa para que el punto de llamada quede igual.
+use crate::commands::show_picker;
 use crate::uinput::VirtualKeyboard;
 
 const HOLD_THRESHOLD: Duration = Duration::from_millis(400);
@@ -728,30 +731,6 @@ fn escribir(ch: char, char_kb: &mut Option<CharKeyboard>, vk: &VirtualKeyboard) 
 /// tarjeta y lugar para la sombra.
 // Las medidas viven en `picker_window`, que también las necesita para dar el
 // tamaño correcto a la ventana que crea.
-
-/// Pone el selector en pantalla.
-///
-/// La mostraba la página al recibir el evento, y no se mapeaba nunca: quedaba
-/// en 0x0 e invisible, así que las variantes sólo se podían elegir a ciegas.
-/// La ventana la abre ahora el mismo lado que decide abrirla, y la página se
-/// ocupa únicamente de dibujar lo que hay adentro.
-fn show_picker(app: &AppHandle, variantes: usize) {
-    use tauri::Manager;
-
-    if app.get_webview_window("main").is_none() {
-        traza("no hay ventana 'main'");
-        return;
-    }
-
-    // La ventana se ajusta a cuántas variantes hay. Con un ancho fijo, la `a`
-    // —que tiene siete— no entraba, y la `n` —que tiene dos— dejaba la tarjeta
-    // perdida en una ventana enorme. La tarjeta se centra sola adentro. El
-    // tamaño lo fija la ventana GTK (ver `commands::resize_and_show`): el
-    // `set_size` de Tauri no tocaba la superficie de capa y la dejaba en 0x0,
-    // mapeada pero invisible.
-    crate::commands::resize_and_show(app, variantes);
-    traza(&format!("mostrada: pedido para {variantes} variantes"));
-}
 
 /// Deja rastro de lo que decide el demonio, para cuando lo que se ve en
 /// pantalla y lo que el teclado creyó hacer no coinciden. Se activa con

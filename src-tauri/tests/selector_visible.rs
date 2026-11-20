@@ -54,7 +54,7 @@ fn el_selector_se_dimensiona_con_la_ventana_gtk() {
 
 #[test]
 fn mostrar_el_selector_no_usa_set_size_de_tauri() {
-    let cuerpo = cuerpo_sin_comentarios(INPUT, "show_picker");
+    let cuerpo = cuerpo_sin_comentarios(COMMANDS, "show_picker");
     assert!(
         !cuerpo.contains(".set_size("),
         "show_picker volvió a usar `set_size` de Tauri: el selector queda 0x0, \
@@ -92,5 +92,43 @@ fn el_selector_no_apaga_la_aceleracion_por_hardware() {
         "tune_webkit volvió a tocar la política de aceleración por hardware: con \
          `Never` el selector (superficie de capa transparente) se mapea pero no \
          presenta ningún pixel. Dejala en su valor por omisión."
+    );
+}
+
+#[test]
+fn mostrar_el_selector_es_glue_fuera_de_cobertura() {
+    // `show_picker` es glue de GTK y vive en commands.rs (excluido de cobertura),
+    // no en input.rs (medido): si vuelve a input.rs, sus líneas nuevas sin cubrir
+    // hunden la puerta de Sonar. Ya pasó.
+    assert!(
+        !INPUT.contains("fn show_picker("),
+        "show_picker no debe definirse en input.rs: es glue sin cobertura, va en commands.rs."
+    );
+    assert!(
+        cuerpo_sin_comentarios(COMMANDS, "show_picker").contains("resize_and_show("),
+        "show_picker (en commands.rs) tiene que mostrar el selector por resize_and_show."
+    );
+}
+
+#[test]
+fn dimensionar_y_mostrar_van_en_el_hilo_principal() {
+    // Las guardas de arriba pasan aunque `resize_and_show` llamara a `dimensionar`
+    // directo en el hilo del teclado; pero el trabajo de GTK tiene que ir dentro
+    // de `run_on_main_thread` o aborta con "GTK may only be used from the main
+    // thread". Se verifica que dimensionar y show queden detrás del despacho.
+    let cuerpo = cuerpo_sin_comentarios(COMMANDS, "resize_and_show");
+    let despacho = cuerpo
+        .find("run_on_main_thread")
+        .expect("resize_and_show tiene que despachar al hilo principal");
+    let dim = cuerpo
+        .find("dimensionar(")
+        .expect("resize_and_show tiene que dimensionar la ventana");
+    assert!(
+        dim > despacho,
+        "dimensionar debe ocurrir DENTRO del closure de run_on_main_thread, no antes."
+    );
+    assert!(
+        cuerpo.contains(".show()"),
+        "resize_and_show tiene que mostrar la ventana tras dimensionarla."
     );
 }

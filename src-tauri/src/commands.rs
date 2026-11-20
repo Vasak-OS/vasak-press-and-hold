@@ -246,6 +246,26 @@ pub(crate) fn ensure_created(app: &AppHandle) {
     CREATING.store(false, Ordering::SeqCst);
 }
 
+/// Pone el selector en pantalla, dimensionado para `variantes`.
+///
+/// La mostraba la página al recibir el evento y no se mapeaba nunca —quedaba en
+/// 0x0 e invisible, así que las variantes se elegían a ciegas—; ahora la abre el
+/// mismo lado que decide abrirla. Vive acá, con el resto del glue de GTK del
+/// selector: mapear una superficie de capa no se ejercita sin un compositor
+/// real, así que queda fuera de cobertura como el resto de `commands.rs`.
+pub(crate) fn show_picker(app: &AppHandle, variantes: usize) {
+    if app.get_webview_window("main").is_none() {
+        traza("no hay ventana 'main'");
+        return;
+    }
+    // La ventana se ajusta a cuántas variantes hay: con un ancho fijo la `a`
+    // —siete variantes— no entraba y la `n` —dos— quedaba perdida. El tamaño lo
+    // fija la ventana GTK (ver `resize_and_show`): el `set_size` de Tauri no
+    // tocaba la superficie de capa y la dejaba en 0x0, mapeada pero invisible.
+    resize_and_show(app, variantes);
+    traza(&format!("mostrada: pedido para {variantes} variantes"));
+}
+
 /// Dimensiona el selector para `variantes` y lo muestra, desde cualquier hilo.
 ///
 /// La llama `show_picker` en el hilo del teclado; el trabajo GTK se despacha al
