@@ -728,7 +728,6 @@ fn escribir(ch: char, char_kb: &mut Option<CharKeyboard>, vk: &VirtualKeyboard) 
 /// tarjeta y lugar para la sombra.
 // Las medidas viven en `picker_window`, que también las necesita para dar el
 // tamaño correcto a la ventana que crea.
-use crate::picker_window::tamano_para;
 
 /// Pone el selector en pantalla.
 ///
@@ -739,27 +738,19 @@ use crate::picker_window::tamano_para;
 fn show_picker(app: &AppHandle, variantes: usize) {
     use tauri::Manager;
 
-    let Some(win) = app.get_webview_window("main") else {
+    if app.get_webview_window("main").is_none() {
         traza("no hay ventana 'main'");
         return;
-    };
+    }
 
     // La ventana se ajusta a cuántas variantes hay. Con un ancho fijo, la `a`
     // —que tiene siete— no entraba, y la `n` —que tiene dos— dejaba la tarjeta
-    // perdida en una ventana enorme. La tarjeta se centra sola adentro.
-    let (ancho, alto) = tamano_para(variantes);
-    if let Err(e) = win.set_size(tauri::LogicalSize::new(ancho, alto)) {
-        traza(&format!("no se pudo redimensionar: {e}"));
-    }
-
-    if let Err(e) = win.show() {
-        traza(&format!("no se pudo mostrar: {e}"));
-    }
-    traza(&format!(
-        "mostrada: visible={:?} tamaño={:?}",
-        win.is_visible(),
-        win.outer_size()
-    ));
+    // perdida en una ventana enorme. La tarjeta se centra sola adentro. El
+    // tamaño lo fija la ventana GTK (ver `commands::resize_and_show`): el
+    // `set_size` de Tauri no tocaba la superficie de capa y la dejaba en 0x0,
+    // mapeada pero invisible.
+    crate::commands::resize_and_show(app, variantes);
+    traza(&format!("mostrada: pedido para {variantes} variantes"));
 }
 
 /// Deja rastro de lo que decide el demonio, para cuando lo que se ve en
