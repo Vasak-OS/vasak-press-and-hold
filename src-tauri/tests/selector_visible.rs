@@ -112,23 +112,27 @@ fn mostrar_el_selector_es_glue_fuera_de_cobertura() {
 
 #[test]
 fn dimensionar_y_mostrar_van_en_el_hilo_principal() {
-    // Las guardas de arriba pasan aunque `resize_and_show` llamara a `dimensionar`
-    // directo en el hilo del teclado; pero el trabajo de GTK tiene que ir dentro
-    // de `run_on_main_thread` o aborta con "GTK may only be used from the main
-    // thread". Se verifica que dimensionar y show queden detrás del despacho.
+    // El trabajo de GTK tiene que ir DENTRO del closure de `run_on_main_thread`
+    // o aborta con "GTK may only be used from the main thread". No alcanza con el
+    // orden del texto (pasaría si todo quedara después del closure): se separa el
+    // cuerpo en lo que está dentro del closure y lo que está fuera, y se exige
+    // que `dimensionar` y `show` estén dentro y no fuera.
     let cuerpo = cuerpo_sin_comentarios(COMMANDS, "resize_and_show");
-    let despacho = cuerpo
-        .find("run_on_main_thread")
-        .expect("resize_and_show tiene que despachar al hilo principal");
-    let dim = cuerpo
-        .find("dimensionar(")
-        .expect("resize_and_show tiene que dimensionar la ventana");
+    let inicio = cuerpo
+        .find("run_on_main_thread(move || {")
+        .expect("resize_and_show tiene que despachar con run_on_main_thread(move || {");
+    let resto = &cuerpo[inicio..];
+    let fin = resto
+        .find("});")
+        .expect("no se encontró el cierre del closure de run_on_main_thread");
+    let dentro = &resto[..fin];
+    let fuera = format!("{}{}", &cuerpo[..inicio], &resto[fin..]);
     assert!(
-        dim > despacho,
-        "dimensionar debe ocurrir DENTRO del closure de run_on_main_thread, no antes."
+        dentro.contains("dimensionar(") && dentro.contains(".show()"),
+        "dimensionar y show tienen que ocurrir DENTRO del closure de run_on_main_thread."
     );
     assert!(
-        cuerpo.contains(".show()"),
-        "resize_and_show tiene que mostrar la ventana tras dimensionarla."
+        !fuera.contains("dimensionar(") && !fuera.contains(".show()"),
+        "dimensionar/show no deben quedar fuera del closure: en el hilo del teclado GTK aborta."
     );
 }
