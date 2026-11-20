@@ -134,9 +134,7 @@ fn find_webkit_webview(container: &gtk::Container) -> Option<webkit2gtk::WebView
 /// Afina WebKit para el selector: es estático, chico y efímero, no necesita los
 /// cachés ni la GPU de un navegador. Baja el piso de memoria del webview.
 fn tune_webkit(window: &tauri::WebviewWindow) {
-    use webkit2gtk::{
-        CacheModel, HardwareAccelerationPolicy, SettingsExt, WebContextExt, WebViewExt,
-    };
+    use webkit2gtk::{CacheModel, SettingsExt, WebContextExt, WebViewExt};
 
     let Ok(gtk_win) = window.gtk_window() else {
         return;
@@ -151,9 +149,10 @@ fn tune_webkit(window: &tauri::WebviewWindow) {
         settings.set_enable_developer_extras(false);
         settings.set_enable_back_forward_navigation_gestures(false);
         settings.set_enable_webgl(false);
-        // Una fila de botones estática no gana nada con la GPU, y sin aceleración
-        // se ahorra un proceso de GPU y los buffers DMABUF.
-        settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+        // No se apaga la aceleración HW: este overlay es transparente y de capa,
+        // y con la política en `Never` el webview renderiza por software y no
+        // presenta ningún pixel —mapeado pero invisible—, el mismo caso que el
+        // cartel de vasak-flare-daemon (fix 0.8.3, PR #47). Queda por omisión.
     }
     if let Some(context) = WebViewExt::web_context(&webview) {
         // No navega páginas: con el caché mínimo alcanza.
@@ -236,7 +235,7 @@ pub(crate) fn ensure_created(app: &AppHandle) {
                 if let Some(variantes) = pendiente {
                     let (ancho, alto) = tamano_para(variantes);
                     traza(&format!("hay un acento esperando: {ancho}x{alto}"));
-                    let _ = ventana.set_size(tauri::LogicalSize::new(ancho, alto));
+                    dimensionar(&ventana, ancho, alto);
                     let _ = ventana.show();
                 }
             });
@@ -245,4 +244,53 @@ pub(crate) fn ensure_created(app: &AppHandle) {
     }
 
     CREATING.store(false, Ordering::SeqCst);
+}
+
+/// Pone el selector en pantalla, dimensionado para `variantes`.
+///
+/// La mostraba la página al recibir el evento y no se mapeaba nunca —quedaba en
+/// 0x0 e invisible, así que las variantes se elegían a ciegas—; ahora la abre el
+/// mismo lado que decide abrirla. Vive acá, con el resto del glue de GTK del
+/// selector: mapear una superficie de capa no se ejercita sin un compositor
+/// real, así que queda fuera de cobertura como el resto de `commands.rs`.
+pub(crate) fn show_picker(app: &AppHandle, variantes: usize) {
+    if app.get_webview_window("main").is_none() {
+        traza("no hay ventana 'main'");
+        return;
+    }
+    // La ventana se ajusta a cuántas variantes hay: con un ancho fijo la `a`
+    // —siete variantes— no entraba y la `n` —dos— quedaba perdida. El tamaño lo
+    // fija la ventana GTK (ver `resize_and_show`): el `set_size` de Tauri no
+    // tocaba la superficie de capa y la dejaba en 0x0, mapeada pero invisible.
+    resize_and_show(app, variantes);
+    traza(&format!("mostrada: pedido para {variantes} variantes"));
+}
+
+/// Dimensiona el selector para `variantes` y lo muestra, desde cualquier hilo.
+///
+/// La llama `show_picker` en el hilo del teclado; el trabajo GTK se despacha al
+/// hilo principal, que es donde tiene que correr.
+pub(crate) fn resize_and_show(app: &AppHandle, variantes: usize) {
+    let (ancho, alto) = tamano_para(variantes);
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(ventana) = handle.get_webview_window("main") {
+            dimensionar(&ventana, ancho, alto);
+            let _ = ventana.show();
+        }
+    });
+}
+
+/// Le fija el tamaño a la superficie de layer-shell del selector.
+///
+/// En una superficie de capa anclada a un solo borde el tamaño lo fija la
+/// ventana GTK, no el `set_size` de Tauri: ése no toca la superficie y la dejaba
+/// commiteada en 0x0 —mapeada, visible y sin un pixel, así que el acento se
+/// elegía a ciegas—. `set_size_request` + `resize` sobre la ventana GTK es como
+/// dimensiona su overlay vasak-flare-daemon. Debe correr en el hilo principal.
+fn dimensionar(ventana: &tauri::WebviewWindow, ancho: f64, alto: f64) {
+    if let Ok(gtk_win) = ventana.gtk_window() {
+        gtk_win.set_size_request(ancho as i32, alto as i32);
+        gtk_win.resize(ancho as i32, alto as i32);
+    }
 }
